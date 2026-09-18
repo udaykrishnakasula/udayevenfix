@@ -11,4 +11,4 @@ uploads/
 *.bak
 .agents/
 .gemini/
-
+src/server/supabaseAdmin.ts
