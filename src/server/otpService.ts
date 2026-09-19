@@ -1,5 +1,5 @@
 import crypto from "crypto";
-import { getSupabaseAdmin, isSupabaseAdminConfigured } from "./supabaseAdmin";
+import { getSupabaseAdmin, isSupabaseAdminConfigured, isAdminKeyVerified } from "./supabaseAdmin";
 import { emailService } from "./emailService";
 
 export type OtpPurpose = "SIGNUP" | "FORGOT_PASSWORD" | "WITHDRAWAL";
@@ -93,7 +93,7 @@ export class OtpService {
       this.cache.set(k, session);
     }
 
-    if (isSupabaseAdminConfigured()) {
+    if (isSupabaseAdminConfigured() && isAdminKeyVerified()) {
       try {
         const client = getSupabaseAdmin();
         const upserts = keys.map((key) => ({
@@ -115,7 +115,7 @@ export class OtpService {
     const storageKey = this.getStorageKey(purpose, identifier);
     
     // Check Supabase first as production source of truth
-    if (isSupabaseAdminConfigured()) {
+    if (isSupabaseAdminConfigured() && isAdminKeyVerified()) {
       try {
         const client = getSupabaseAdmin();
         const { data, error } = await client
@@ -151,7 +151,7 @@ export class OtpService {
       this.cache.delete(k);
     }
 
-    if (isSupabaseAdminConfigured()) {
+    if (isSupabaseAdminConfigured() && isAdminKeyVerified()) {
       try {
         const client = getSupabaseAdmin();
         await client.from("platform_settings").delete().in("key", keys);

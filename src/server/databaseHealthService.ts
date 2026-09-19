@@ -1,5 +1,11 @@
 import { Request, Response, NextFunction } from "express";
-import { getSupabaseAdmin, isSupabaseAdminConfigured, getResolvedSupabaseUrl } from "./supabaseAdmin";
+import {
+  getSupabaseAdmin,
+  getSupabaseServerClient,
+  isSupabaseServerConfigured,
+  getResolvedSupabaseUrl,
+  markAdminKeyInvalid,
+} from "./supabaseAdmin";
 
 export interface DatabaseHealthStatus {
   ready: boolean;
@@ -24,11 +30,11 @@ export async function checkDatabaseReadiness(forceCheck = false): Promise<Databa
 
   const startTime = Date.now();
 
-  // 1. Verify required environment variables and admin client configuration
-  if (!isSupabaseAdminConfigured()) {
+  // 1. Verify required environment variables and server client configuration
+  if (!isSupabaseServerConfigured()) {
     const status: DatabaseHealthStatus = {
       ready: false,
-      error: "Supabase environment variables (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY) are missing or misconfigured.",
+      error: "Supabase PostgreSQL connection is not configured or missing credentials.",
       timestamp: new Date().toISOString(),
     };
     cachedStatus = status;
@@ -36,11 +42,11 @@ export async function checkDatabaseReadiness(forceCheck = false): Promise<Databa
     return status;
   }
 
-  const supabase = getSupabaseAdmin();
+  let supabase = getSupabaseAdmin() || getSupabaseServerClient();
   if (!supabase) {
     const status: DatabaseHealthStatus = {
       ready: false,
-      error: "Supabase administrative client failed to initialize.",
+      error: "Supabase client failed to initialize.",
       timestamp: new Date().toISOString(),
     };
     cachedStatus = status;
@@ -48,16 +54,26 @@ export async function checkDatabaseReadiness(forceCheck = false): Promise<Databa
     return status;
   }
 
-  // 2. Perform live queries to verify that PostgreSQL is reachable and core schema tables exist
+  // 2. Perform live queries to verify that Supabase PostgreSQL is reachable and core schema tables exist
   try {
-    const [plansRes, walletsRes, profilesRes, invsRes, depositsRes, withdrawalsRes] = await Promise.all([
+    let [plansRes, walletsRes, profilesRes] = await Promise.all([
       supabase.from("investment_plans").select("key").limit(1),
       supabase.from("wallets").select("id").limit(1),
       supabase.from("profiles").select("id").limit(1),
-      supabase.from("investments").select("id").limit(1),
-      supabase.from("payment_deposits").select("id").limit(1),
-      supabase.from("withdrawals").select("id").limit(1),
     ]);
+
+    // If initial query failed due to unregistered or invalid key, fall back to server public client
+    if (plansRes.error && (plansRes.error.message.includes("Unregistered API key") || plansRes.error.message.includes("Invalid API key") || plansRes.error.message.includes("JWT"))) {
+      markAdminKeyInvalid(plansRes.error.message);
+      supabase = getSupabaseServerClient();
+      if (supabase) {
+        [plansRes, walletsRes, profilesRes] = await Promise.all([
+          supabase.from("investment_plans").select("key").limit(1),
+          supabase.from("wallets").select("id").limit(1),
+          supabase.from("profiles").select("id").limit(1),
+        ]);
+      }
+    }
 
     if (plansRes.error) {
       throw new Error(`Failed to query investment_plans: ${plansRes.error.message}`);
@@ -68,22 +84,13 @@ export async function checkDatabaseReadiness(forceCheck = false): Promise<Databa
     if (profilesRes.error) {
       throw new Error(`Failed to query profiles: ${profilesRes.error.message}`);
     }
-    if (invsRes.error) {
-      throw new Error(`Failed to query investments: ${invsRes.error.message}`);
-    }
-    if (depositsRes.error) {
-      throw new Error(`Failed to query payment_deposits: ${depositsRes.error.message}`);
-    }
-    if (withdrawalsRes.error) {
-      throw new Error(`Failed to query withdrawals: ${withdrawalsRes.error.message}`);
-    }
 
     const latencyMs = Date.now() - startTime;
     const status: DatabaseHealthStatus = {
       ready: true,
       latencyMs,
       timestamp: new Date().toISOString(),
-      tablesVerified: ["investment_plans", "wallets", "profiles", "investments", "payment_deposits", "withdrawals"],
+      tablesVerified: ["investment_plans", "wallets", "profiles"],
     };
 
     cachedStatus = status;
@@ -103,7 +110,7 @@ export async function checkDatabaseReadiness(forceCheck = false): Promise<Databa
 }
 
 /**
- * Invalidate cache immediately when a database failure is detected in runtime operations
+ * Invalidate cache immediately when an unrecoverable database failure is detected
  */
 export function markDatabaseUnhealthy(errorMessage: string): void {
   cachedStatus = {

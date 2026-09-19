@@ -89,56 +89,83 @@ function WildcardRoute() {
   return <Navigate to="/" replace />;
 }
 
+function DatabaseConnectionGuard({ children }) {
+  const { isDatabaseHealthy, isChecking, checkReadiness } = useDatabaseHealth();
+
+  if (isChecking) {
+    return (
+      <div
+        id="server-connecting-screen"
+        data-testid="server-connecting-screen"
+        className="min-h-screen flex flex-col items-center justify-center bg-[#0d0b14] text-white px-4"
+      >
+        <div className="h-8 w-8 rounded-full border-2 border-white/20 border-t-[#9680dc] animate-spin mb-4" />
+        <p className="text-sm font-medium text-white/80 tracking-wide">
+          Connecting to server...
+        </p>
+      </div>
+    );
+  }
+
+  if (!isDatabaseHealthy) {
+    return <ServerUnavailableView onRetry={() => checkReadiness(true)} />;
+  }
+
+  return children;
+}
+
 function App() {
   return (
     <div className="App">
       <ErrorBoundary>
         <BrowserRouter>
           <DatabaseHealthProvider>
-            <AuthProvider>
-              <BrandingProvider>
-                <AnalyticsProvider>
-                  <Routes>
-                  {/* Public Landing & Authentication */}
-                  <Route path="/" element={<RootRoute />} />
-                  <Route path="/login" element={<LoginPage />} />
-                  <Route path="/register" element={<RegisterPage />} />
-                  <Route path="/verify-email" element={<VerifyEmailPage />} />
-                  <Route path="/forgot-password" element={<ForgotPasswordPage />} />
-                  <Route path="/reset-password" element={<ForgotPasswordPage />} />
+            <DatabaseConnectionGuard>
+              <AuthProvider>
+                <BrandingProvider>
+                  <AnalyticsProvider>
+                    <Routes>
+                    {/* Public Landing & Authentication */}
+                    <Route path="/" element={<RootRoute />} />
+                    <Route path="/login" element={<LoginPage />} />
+                    <Route path="/register" element={<RegisterPage />} />
+                    <Route path="/verify-email" element={<VerifyEmailPage />} />
+                    <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+                    <Route path="/reset-password" element={<ForgotPasswordPage />} />
 
-                  {/* Legacy /app paths backwards-compatibility redirect */}
-                  <Route path="/app" element={<Navigate to="/dashboard" replace />} />
-                  <Route path="/app/*" element={<Navigate to="/dashboard" replace />} />
+                    {/* Legacy /app paths backwards-compatibility redirect */}
+                    <Route path="/app" element={<Navigate to="/dashboard" replace />} />
+                    <Route path="/app/*" element={<Navigate to="/dashboard" replace />} />
 
-                  {/* Admin Application Architecture (/admin/*) */}
-                  <Route
-                    path="/admin/*"
-                    element={
-                      <ProtectedRoute adminOnly>
-                        <AdminRoutes />
-                      </ProtectedRoute>
-                    }
-                  />
+                    {/* Admin Application Architecture (/admin/*) */}
+                    <Route
+                      path="/admin/*"
+                      element={
+                        <ProtectedRoute adminOnly>
+                          <AdminRoutes />
+                        </ProtectedRoute>
+                      }
+                    />
 
-                  {/* User Application Architecture (/dashboard, /investments, /wallet, etc.) */}
-                  <Route
-                    path="/*"
-                    element={
-                      <ProtectedRoute>
-                        <UserRoutes />
-                      </ProtectedRoute>
-                    }
-                  />
+                    {/* User Application Architecture (/dashboard, /investments, /wallet, etc.) */}
+                    <Route
+                      path="/*"
+                      element={
+                        <ProtectedRoute>
+                          <UserRoutes />
+                        </ProtectedRoute>
+                      }
+                    />
 
-                  <Route path="*" element={<WildcardRoute />} />
-                </Routes>
-                <GlobalKeyboardShortcuts />
-                <NetworkStatusBanner />
-                <AppToaster />
-              </AnalyticsProvider>
-            </BrandingProvider>
-          </AuthProvider>
+                    <Route path="*" element={<WildcardRoute />} />
+                  </Routes>
+                  <GlobalKeyboardShortcuts />
+                  <NetworkStatusBanner />
+                </AnalyticsProvider>
+              </BrandingProvider>
+            </AuthProvider>
+          </DatabaseConnectionGuard>
+          <AppToaster />
         </DatabaseHealthProvider>
       </BrowserRouter>
       </ErrorBoundary>

@@ -830,25 +830,20 @@ const saveDatabase = (immediate = false) => {
         fs.mkdirSync(DATA_DIR, { recursive: true });
       }
       const serialized = {
-        users: Array.from(db.users.entries()),
-        wallets: Array.from(db.wallets.entries()),
-        wallet_transactions: Array.from(db.wallet_transactions.entries()),
+        // Account and financial entities are strictly authoritative in Supabase only.
+        // No local disk persistence or fallback allowed for financial state.
+        users: [],
+        wallets: [],
+        wallet_transactions: [],
         investment_plans: Array.from(db.investment_plans.entries()),
         plan_history: db.plan_history,
-        investments: Array.from(db.investments.entries()),
-        deposits: Array.from(db.deposits.entries()),
-        withdrawals: Array.from(db.withdrawals.entries()),
-        referrals: db.referrals,
-        referral_commissions: Array.from(db.referral_commissions.entries()),
-        kyc_records: Array.from(db.kyc_records.entries()),
-        kyc_documents: Array.from(db.kyc_documents.entries()).map(([k, doc]) => [
-          k,
-          {
-            ...doc,
-            data: doc.data && Buffer.isBuffer(doc.data) ? doc.data.toString("base64") : doc.data,
-            _is_b64: Boolean(doc.data && Buffer.isBuffer(doc.data)),
-          },
-        ]),
+        investments: [],
+        deposits: [],
+        withdrawals: [],
+        referrals: [],
+        referral_commissions: [],
+        kyc_records: [],
+        kyc_documents: [],
         liveness_sessions: Array.from(db.liveness_sessions.entries()),
         password_resets: Array.from(db.password_resets.entries()),
         email_verifications: Array.from(db.email_verifications.entries()),
@@ -886,11 +881,6 @@ const saveDatabase = (immediate = false) => {
         }
       }
       fs.renameSync(tmpFile, DB_FILE);
-
-      // Asynchronously synchronize state to Supabase if configured
-      if (isSupabaseServerConfigured()) {
-        supabaseSync.syncEntireStateToSupabase(db).catch(() => {});
-      }
     } catch (err) {
       console.error("[EasyX DB] Failed to save database to disk:", err);
     }
@@ -942,59 +932,25 @@ const loadDatabase = () => {
     }
     if (!parsed) return false;
 
-    if (Array.isArray(parsed.users)) {
-      db.users.clear();
-      for (const [k, v] of parsed.users) db.users.set(k, v);
-    }
-    if (Array.isArray(parsed.wallets)) {
-      db.wallets.clear();
-      for (const [k, v] of parsed.wallets) db.wallets.set(k, v);
-    }
-    if (Array.isArray(parsed.wallet_transactions)) {
-      db.wallet_transactions.clear();
-      for (const [k, v] of parsed.wallet_transactions) db.wallet_transactions.set(k, v);
-    }
+    // Financial and account entities are strictly sourced from Supabase.
+    // Ensure in-memory fallback stores remain clean and are never populated from disk.
+    db.users.clear();
+    db.wallets.clear();
+    db.wallet_transactions.clear();
+    db.investments.clear();
+    db.deposits.clear();
+    db.withdrawals.clear();
+    db.referrals = [];
+    db.referral_commissions.clear();
+    db.kyc_records.clear();
+    db.kyc_documents.clear();
+
     if (Array.isArray(parsed.investment_plans)) {
       db.investment_plans.clear();
       for (const [k, v] of parsed.investment_plans) db.investment_plans.set(k, v);
     }
     if (Array.isArray(parsed.plan_history)) {
       db.plan_history = parsed.plan_history;
-    }
-    if (Array.isArray(parsed.investments)) {
-      db.investments.clear();
-      for (const [k, v] of parsed.investments) db.investments.set(k, v);
-    }
-    if (Array.isArray(parsed.deposits)) {
-      db.deposits.clear();
-      for (const [k, v] of parsed.deposits) db.deposits.set(k, v);
-    }
-    if (Array.isArray(parsed.withdrawals)) {
-      db.withdrawals.clear();
-      for (const [k, v] of parsed.withdrawals) db.withdrawals.set(k, v);
-    }
-    if (Array.isArray(parsed.referrals)) {
-      db.referrals = parsed.referrals;
-    }
-    if (Array.isArray(parsed.referral_commissions)) {
-      db.referral_commissions.clear();
-      for (const [k, v] of parsed.referral_commissions) db.referral_commissions.set(k, v);
-    }
-    if (Array.isArray(parsed.kyc_records)) {
-      db.kyc_records.clear();
-      for (const [k, v] of parsed.kyc_records) db.kyc_records.set(k, v);
-    }
-    if (Array.isArray(parsed.kyc_documents)) {
-      db.kyc_documents.clear();
-      for (const [k, doc] of parsed.kyc_documents) {
-        let buf = doc.data;
-        if (doc._is_b64 && typeof doc.data === "string") {
-          buf = Buffer.from(doc.data, "base64");
-        } else if (doc.data && typeof doc.data === "object" && doc.data.type === "Buffer" && Array.isArray(doc.data.data)) {
-          buf = Buffer.from(doc.data.data);
-        }
-        db.kyc_documents.set(k, { ...doc, data: buf });
-      }
     }
     if (Array.isArray(parsed.liveness_sessions)) {
       db.liveness_sessions.clear();
@@ -3034,14 +2990,6 @@ const getPlansState = (userId: string) => {
 api.get("/dashboard", authMiddleware, async (req, res) => {
   const user = (req as any).user;
 
-  if (!isSupabaseAdminConfigured()) {
-    return res.status(503).json({
-      code: "database_unavailable",
-      detail: "Server temporarily unavailable. Please try again later.",
-      message: "Server temporarily unavailable. Please try again later.",
-    });
-  }
-
   try {
     const [wallet, plans, profile] = await Promise.all([
       supabaseDb.getWalletSummary(user.id),
@@ -3069,36 +3017,19 @@ api.get("/dashboard", authMiddleware, async (req, res) => {
       },
     });
   } catch (err: any) {
-    console.warn("[EasyX Dashboard] Live Supabase fetch failed:", err?.message);
-    markDatabaseUnhealthy(err?.message || "Failed to load dashboard from database");
-    return res.status(503).json({
-      code: "database_unavailable",
-      detail: "Server temporarily unavailable. Please try again later.",
-      message: "Server temporarily unavailable. Please try again later.",
-    });
+    console.error("[EasyX Dashboard] Authoritative Supabase fetch failed:", err?.message);
+    return res.status(503).json({ detail: "Dashboard data temporarily unavailable from authoritative database." });
   }
 });
 
 api.get("/plans", authMiddleware, async (req, res) => {
   const user = (req as any).user;
-  if (!isSupabaseAdminConfigured()) {
-    return res.status(503).json({
-      code: "database_unavailable",
-      detail: "Server temporarily unavailable. Please try again later.",
-      message: "Server temporarily unavailable. Please try again later.",
-    });
-  }
   try {
     const plans = await supabaseDb.getPlansState(user.id);
     return res.json(plans);
   } catch (err: any) {
-    console.warn("[EasyX Plans] Supabase plans fetch failed:", err?.message);
-    markDatabaseUnhealthy(err?.message || "Failed to query plans from database");
-    return res.status(503).json({
-      code: "database_unavailable",
-      detail: "Server temporarily unavailable. Please try again later.",
-      message: "Server temporarily unavailable. Please try again later.",
-    });
+    console.error("[EasyX Plans] Authoritative Supabase plans fetch failed:", err?.message);
+    return res.status(503).json({ detail: "Plans temporarily unavailable from authoritative database." });
   }
 });
 
@@ -3109,14 +3040,6 @@ api.post("/investments", authMiddleware, async (req, res) => {
   }
   const user = (req as any).user;
   const { plan_key, amount, idempotency_key } = req.body;
-
-  if (!isSupabaseAdminConfigured()) {
-    return res.status(503).json({
-      code: "database_unavailable",
-      detail: "Server temporarily unavailable. Please try again later.",
-      message: "Server temporarily unavailable. Please try again later.",
-    });
-  }
 
   try {
     const inv = await supabaseDb.createInvestment({
@@ -3130,19 +3053,11 @@ api.post("/investments", authMiddleware, async (req, res) => {
       reminderEngine.handleUserActionCompleted(user.id, "investment");
       return res.status(201).json(inv);
     }
-    return res.status(400).json({ detail: "Failed to create investment." });
+    return res.status(500).json({ detail: "Failed to create investment." });
   } catch (err: any) {
-    console.warn("[EasyX Investment] Supabase investment error:", err?.message);
-    const msg = err?.message || "";
-    if (msg.includes("connection") || msg.includes("network") || msg.includes("timeout") || msg.includes("fetch failed") || msg.includes("database")) {
-      markDatabaseUnhealthy(msg);
-      return res.status(503).json({
-        code: "database_unavailable",
-        detail: "Server temporarily unavailable. Please try again later.",
-        message: "Server temporarily unavailable. Please try again later.",
-      });
-    }
-    return res.status(400).json({ detail: msg || "Failed to create investment." });
+    console.error("[EasyX Investment] Investment creation error:", err?.message);
+    const statusCode = err?.status || (err?.message?.includes("Insufficient") ? 400 : 503);
+    return res.status(statusCode).json({ detail: err?.message || "Investment creation failed." });
   }
 });
 
@@ -3150,38 +3065,17 @@ api.get("/investments", authMiddleware, async (req, res) => {
   const user = (req as any).user;
   const { plan_key } = req.query;
 
-  if (!isSupabaseAdminConfigured()) {
-    return res.status(503).json({
-      code: "database_unavailable",
-      detail: "Server temporarily unavailable. Please try again later.",
-      message: "Server temporarily unavailable. Please try again later.",
-    });
-  }
-
   try {
     const list = await supabaseDb.getUserInvestments(user.id, plan_key as string);
     return res.json(list || []);
   } catch (err: any) {
-    console.warn("[EasyX Investments] Supabase fetch error:", err?.message);
-    markDatabaseUnhealthy(err?.message || "Database unreachable");
-    return res.status(503).json({
-      code: "database_unavailable",
-      detail: "Server temporarily unavailable. Please try again later.",
-      message: "Server temporarily unavailable. Please try again later.",
-    });
+    console.error("[EasyX Investments] Authoritative fetch failed:", err?.message);
+    return res.status(503).json({ detail: "Investments data temporarily unavailable from authoritative database." });
   }
 });
 
 api.get("/investments/:id", authMiddleware, async (req, res) => {
   const user = (req as any).user;
-
-  if (!isSupabaseAdminConfigured()) {
-    return res.status(503).json({
-      code: "database_unavailable",
-      detail: "Server temporarily unavailable. Please try again later.",
-      message: "Server temporarily unavailable. Please try again later.",
-    });
-  }
 
   try {
     const inv = await supabaseDb.getInvestmentById(req.params.id);
@@ -3190,13 +3084,8 @@ api.get("/investments/:id", authMiddleware, async (req, res) => {
     }
     return res.status(404).json({ detail: "Investment not found." });
   } catch (err: any) {
-    console.warn("[EasyX Investment] Supabase fetch notice:", err?.message);
-    markDatabaseUnhealthy(err?.message || "Database unreachable");
-    return res.status(503).json({
-      code: "database_unavailable",
-      detail: "Server temporarily unavailable. Please try again later.",
-      message: "Server temporarily unavailable. Please try again later.",
-    });
+    console.error("[EasyX Investment] Fetch error:", err?.message);
+    return res.status(503).json({ detail: "Investment details temporarily unavailable." });
   }
 });
 
@@ -3299,14 +3188,6 @@ api.post("/deposits", authMiddleware, async (req, res) => {
     });
   }
 
-  if (!isSupabaseAdminConfigured()) {
-    return res.status(503).json({
-      code: "database_unavailable",
-      detail: "Server temporarily unavailable. Please try again later.",
-      message: "Server temporarily unavailable. Please try again later.",
-    });
-  }
-
   try {
     const deposit = await supabaseDb.createDeposit({
       userId: user.id,
@@ -3320,42 +3201,21 @@ api.post("/deposits", authMiddleware, async (req, res) => {
       reminderEngine.handleUserActionCompleted(user.id, "deposit");
       return res.status(201).json(deposit);
     }
-    return res.status(400).json({ detail: "Failed to create deposit." });
+    return res.status(500).json({ detail: "Failed to submit deposit." });
   } catch (err: any) {
-    console.warn("[EasyX Deposit] Supabase deposit error:", err?.message);
-    const msg = err?.message || "";
-    if (msg.includes("connection") || msg.includes("network") || msg.includes("timeout") || msg.includes("fetch failed") || msg.includes("database")) {
-      markDatabaseUnhealthy(msg);
-      return res.status(503).json({
-        code: "database_unavailable",
-        detail: "Server temporarily unavailable. Please try again later.",
-        message: "Server temporarily unavailable. Please try again later.",
-      });
-    }
-    return res.status(400).json({ detail: msg || "Failed to create deposit." });
+    console.error("[EasyX Deposit] Deposit creation error:", err?.message);
+    return res.status(503).json({ detail: err?.message || "Failed to process deposit." });
   }
 });
 
 api.get("/deposits", authMiddleware, async (req, res) => {
   const user = (req as any).user;
-  if (!isSupabaseAdminConfigured()) {
-    return res.status(503).json({
-      code: "database_unavailable",
-      detail: "Server temporarily unavailable. Please try again later.",
-      message: "Server temporarily unavailable. Please try again later.",
-    });
-  }
   try {
     const list = await supabaseDb.getUserDeposits(user.id);
     return res.json(list || []);
   } catch (err: any) {
-    console.warn("[EasyX Deposits] Supabase deposits fetch failed:", err?.message);
-    markDatabaseUnhealthy(err?.message || "Database unreachable");
-    return res.status(503).json({
-      code: "database_unavailable",
-      detail: "Server temporarily unavailable. Please try again later.",
-      message: "Server temporarily unavailable. Please try again later.",
-    });
+    console.error("[EasyX Deposits] Deposits fetch error:", err?.message);
+    return res.status(503).json({ detail: "Deposits data temporarily unavailable from authoritative database." });
   }
 });
 
@@ -3472,14 +3332,6 @@ api.post("/withdrawals", authMiddleware, async (req, res) => {
   }
 
   // 2. Authoritative Supabase transaction processing
-  if (!isSupabaseAdminConfigured()) {
-    return res.status(503).json({
-      code: "database_unavailable",
-      detail: "Server temporarily unavailable. Please try again later.",
-      message: "Server temporarily unavailable. Please try again later.",
-    });
-  }
-
   try {
     const idempotencyKey = (req.headers["x-idempotency-key"] as string) || req.body.idempotency_key;
     const w = await supabaseDb.createWithdrawal({
@@ -3493,91 +3345,61 @@ api.post("/withdrawals", authMiddleware, async (req, res) => {
     if (w) {
       return res.status(201).json(w);
     }
-    return res.status(400).json({
-      code: "withdrawal_error",
-      message: "Failed to process withdrawal.",
-    });
+    return res.status(500).json({ detail: "Failed to process withdrawal." });
   } catch (err: any) {
-    console.warn("[EasyX Withdrawal] Supabase withdrawal error:", err?.message);
-    const msg = err?.message || "";
-    if (msg.includes("connection") || msg.includes("network") || msg.includes("timeout") || msg.includes("fetch failed") || msg.includes("database")) {
-      markDatabaseUnhealthy(msg);
-      return res.status(503).json({
-        code: "database_unavailable",
-        detail: "Server temporarily unavailable. Please try again later.",
-        message: "Server temporarily unavailable. Please try again later.",
-      });
-    }
-    return res.status(400).json({
-      code: "withdrawal_error",
-      message: msg || "Failed to process withdrawal.",
-    });
+    console.error("[EasyX Withdrawal] Authoritative withdrawal creation error:", err?.message);
+    const statusCode = err?.status || (err?.message?.includes("Insufficient") ? 400 : 503);
+    return res.status(statusCode).json({ detail: err?.message || "Withdrawal request failed." });
   }
 });
 
 api.get("/withdrawals", authMiddleware, async (req, res) => {
   const user = (req as any).user;
-  if (!isSupabaseAdminConfigured()) {
-    return res.status(503).json({
-      code: "database_unavailable",
-      detail: "Server temporarily unavailable. Please try again later.",
-      message: "Server temporarily unavailable. Please try again later.",
-    });
-  }
   try {
     const list = await supabaseDb.getUserWithdrawals(user.id);
     return res.json(list || []);
   } catch (err: any) {
-    console.warn("[EasyX Withdrawals] Supabase withdrawals list error:", err?.message);
-    markDatabaseUnhealthy(err?.message || "Database unreachable");
-    return res.status(503).json({
-      code: "database_unavailable",
-      detail: "Server temporarily unavailable. Please try again later.",
-      message: "Server temporarily unavailable. Please try again later.",
-    });
+    console.error("[EasyX Withdrawals] Withdrawals fetch error:", err?.message);
+    return res.status(503).json({ detail: "Withdrawals data temporarily unavailable from authoritative database." });
   }
 });
 
 // Wallet & Transactions
 api.get("/wallet", authMiddleware, async (req, res) => {
   const user = (req as any).user;
-  if (!isSupabaseAdminConfigured()) {
-    return res.status(503).json({
-      code: "database_unavailable",
-      detail: "Server temporarily unavailable. Please try again later.",
-      message: "Server temporarily unavailable. Please try again later.",
-    });
-  }
   try {
     const summary = await supabaseDb.getWalletSummary(user.id);
     return res.json(summary);
   } catch (err: any) {
-    console.warn("[EasyX Wallet] Supabase wallet fetch error:", err?.message);
-    markDatabaseUnhealthy(err?.message || "Database unreachable");
-    return res.status(503).json({
-      code: "database_unavailable",
-      detail: "Server temporarily unavailable. Please try again later.",
-      message: "Server temporarily unavailable. Please try again later.",
-    });
+    console.error("[EasyX Wallet] Wallet fetch error:", err?.message);
+    return res.status(503).json({ detail: "Wallet data temporarily unavailable from authoritative database." });
   }
 });
 
-api.get("/wallet/consistency", authMiddleware, (req, res) => {
+api.get("/wallet/consistency", authMiddleware, async (req, res) => {
   const user = (req as any).user;
-  const w = getOrCreateWallet(user.id);
-  let ledgerBal = 0;
-  for (const t of db.wallet_transactions.values()) {
-    if (t.user_id === user.id && t.status === "completed") {
-      ledgerBal += t.direction === "credit" ? Number(t.amount) : -Number(t.amount);
+  try {
+    const [w, txs] = await Promise.all([
+      supabaseDb.getWallet(user.id),
+      supabaseDb.getTransactions(user.id, 500),
+    ]);
+    let ledgerBal = 0;
+    for (const t of txs) {
+      if (t.status === "completed") {
+        ledgerBal += t.direction === "credit" ? Number(t.amount) : -Number(t.amount);
+      }
     }
+    const avail = Number(w.available_balance || 0);
+    res.json({
+      user_id: user.id,
+      available_balance: fmt(avail),
+      ledger_balance: fmt(ledgerBal),
+      consistent: Math.abs(avail - ledgerBal) < 0.001,
+    });
+  } catch (err: any) {
+    console.error("[EasyX Wallet] Consistency check error:", err?.message);
+    return res.status(503).json({ detail: "Wallet consistency check temporarily unavailable." });
   }
-  const avail = Number(w.available_balance || 0);
-  res.json({
-    user_id: user.id,
-    available_balance: fmt(avail),
-    ledger_balance: fmt(ledgerBal),
-    consistent: Math.abs(avail - ledgerBal) < 0.001,
-  });
 });
 
 api.get("/transactions", authMiddleware, async (req, res) => {
@@ -3585,73 +3407,28 @@ api.get("/transactions", authMiddleware, async (req, res) => {
   const limit = Math.min(Number(req.query.limit || 50), 200);
   try {
     const list = await supabaseDb.getTransactions(user.id, limit);
-    res.json(list);
+    res.json(list || []);
   } catch (err: any) {
-    const skip = Number(req.query.skip || 0);
-    const list = Array.from(db.wallet_transactions.values())
-      .filter((t) => t.user_id === user.id)
-      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-      .slice(skip, skip + limit);
-    res.json(list);
+    console.error("[EasyX Transactions] Transactions fetch error:", err?.message);
+    return res.status(503).json({ detail: "Transactions data temporarily unavailable from authoritative database." });
   }
 });
 
-api.get("/rewards/feed", authMiddleware, (req, res) => {
+api.get("/rewards/feed", authMiddleware, async (req, res) => {
   const user = (req as any).user;
   const limit = Math.min(Number(req.query.limit || 30), 100);
   const since = req.query.since ? String(req.query.since) : null;
 
-  // Build a set of rejected or cancelled withdrawal IDs so they never appear in rewards & payouts
-  const rejectedWithdrawalIds = new Set<string>();
-  for (const w of db.withdrawals.values()) {
-    if (w.status === "rejected" || w.status === "cancelled") {
-      rejectedWithdrawalIds.add(w.id);
-    }
-  }
-  for (const t of db.wallet_transactions.values()) {
-    if (t.type === "WITHDRAWAL_REVERSAL") {
-      const refId = t.ref_id || t.reference_id;
-      if (refId) rejectedWithdrawalIds.add(refId);
-      if (typeof t.idempotency_key === "string" && t.idempotency_key.startsWith("withdraw-reverse:")) {
-        rejectedWithdrawalIds.add(t.idempotency_key.replace("withdraw-reverse:", ""));
-      }
-    }
-  }
+  try {
+    const txs = await supabaseDb.getTransactions(user.id, 200);
+    const validTypes = ["PROFIT", "INVESTMENT_MATURITY", "REFERRAL_COMMISSION", "WITHDRAWAL"];
+    let list = (txs || []).filter((t: any) => validTypes.includes(t.type));
 
-  const validTypes = ["PROFIT", "INVESTMENT_MATURITY", "REFERRAL_COMMISSION", "WITHDRAWAL"];
-  let list = Array.from(db.wallet_transactions.values()).filter((t) => {
-    if (t.user_id !== user.id || !validTypes.includes(t.type)) return false;
-
-    // A rejected or reversed withdrawal is not a payout and must not appear in the rewards & payouts feed
-    if (t.type === "WITHDRAWAL") {
-      const wId =
-        t.ref_id ||
-        t.reference_id ||
-        (typeof t.idempotency_key === "string" && t.idempotency_key.startsWith("withdraw:")
-          ? t.idempotency_key.replace("withdraw:", "")
-          : null);
-      if (wId && rejectedWithdrawalIds.has(wId)) {
-        return false;
-      }
-      if (wId) {
-        const w = db.withdrawals.get(wId);
-        if (w && (w.status === "rejected" || w.status === "cancelled")) {
-          return false;
-        }
-      }
+    if (since) {
+      list = list.filter((t: any) => t.created_at > since);
     }
 
-    return true;
-  });
-
-  if (since) {
-    list = list.filter((t) => t.created_at > since);
-  }
-
-  const items = list
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-    .slice(0, limit)
-    .map((t) => {
+    const items = list.slice(0, limit).map((t: any) => {
       let category = "other";
       if (["PROFIT", "REFERRAL_COMMISSION"].includes(t.type)) category = "reward";
       else if (t.type === "INVESTMENT_MATURITY") category = "maturity";
@@ -3659,48 +3436,41 @@ api.get("/rewards/feed", authMiddleware, (req, res) => {
       return { ...t, category };
     });
 
-  res.json(items);
+    res.json(items);
+  } catch (err: any) {
+    console.error("[EasyX Rewards Feed] Feed fetch error:", err?.message);
+    return res.status(503).json({ detail: "Rewards feed temporarily unavailable." });
+  }
 });
 
 // Referrals
-api.get("/referrals/summary", authMiddleware, (req, res) => {
+api.get("/referrals/summary", authMiddleware, async (req, res) => {
   const user = (req as any).user;
-  const referees = Array.from(db.users.values())
-    .filter((u) => u.referred_by === user.id)
-    .map((u) => ({ id: u.id, name: u.name, joined_at: u.created_at }))
-    .sort((a, b) => new Date(b.joined_at).getTime() - new Date(a.joined_at).getTime());
-
-  const comms = Array.from(db.referral_commissions.values())
-    .filter((c) => c.referrer_id === user.id)
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-    .map((c) => {
-      const refUser = db.users.get(c.referee_id);
-      return {
+  try {
+    const summary = await supabaseDb.getReferralSummary(user.id);
+    return res.json({
+      referral_code: summary.referral_code,
+      referral_percentage: fmt(db.platform_settings.referral_percentage || 10),
+      total_referrals: summary.referees_count,
+      total_commission_earned: summary.total_commission,
+      total_commissions: summary.commissions_history?.length || 0,
+      referrals: summary.direct_referrals,
+      commissions: (summary.commissions_history || []).map((c: any) => ({
         id: c.id,
         referee_id: c.referee_id,
-        referee_name: refUser?.name || "Referral",
+        referee_name: c.referee_name,
         investment_id: c.investment_id,
-        plan_key: c.plan_key,
-        amount: fmt(c.amount),
-        percentage: fmt(c.percentage),
+        amount: c.commission_amount,
+        percentage: fmt(c.tier_percentage || 10),
         status: c.status,
         created_at: c.created_at,
-      };
+      })),
+      ...summary,
     });
-
-  const totalCommission = comms
-    .filter((c) => c.status === "paid")
-    .reduce((sum, c) => sum + Number(c.amount), 0);
-
-  res.json({
-    referral_code: user.referral_code,
-    referral_percentage: fmt(db.platform_settings.referral_percentage || 10),
-    total_referrals: referees.length,
-    total_commission_earned: fmt(totalCommission),
-    total_commissions: comms.length,
-    referrals: referees,
-    commissions: comms,
-  });
+  } catch (err: any) {
+    console.error("[EasyX Referrals] Summary fetch error:", err?.message);
+    return res.status(503).json({ detail: "Referral data temporarily unavailable." });
+  }
 });
 
 // Notifications
@@ -4837,73 +4607,14 @@ api.get("/admin/kyc/documents/:id", adminMiddleware, async (req, res) => {
 // ==================== ADMIN ROUTES ====================
 
 // Overview & KPIs
-api.get("/admin/overview", adminMiddleware, (_req, res) => {
-  const users = Array.from(db.users.values()).filter((u) => u.role !== "admin");
-  const usersActive = users.filter((u) => u.status === "active").length;
-  const usersSuspended = users.filter((u) => u.status === "suspended").length;
-
-  const nowMs = Date.now();
-  const sevenDaysMs = 7 * 86400 * 1000;
-
-  const invs = Array.from(db.investments.values());
-  const invActive = invs.filter((i) => i.status === "active").length;
-  const invMatured = invs.filter((i) => i.status === "matured").length;
-  const invCancelled = invs.filter((i) => i.status === "cancelled").length;
-  const invMaturingSoon = invs.filter((i) => {
-    if (i.status !== "active" || !i.maturity_at) return false;
-    const diff = new Date(i.maturity_at).getTime() - nowMs;
-    return diff > 0 && diff <= sevenDaysMs;
-  }).length;
-  const activePrincipal = invs
-    .filter((i) => i.status === "active")
-    .reduce((sum, i) => sum + Number(i.principal || 0), 0);
-
-  const deps = Array.from(db.deposits.values());
-  const depPending = deps.filter((d) => d.status === "pending").length;
-  const depApprovedTotal = deps
-    .filter((d) => d.status === "approved")
-    .reduce((sum, d) => sum + Number(d.approved_amount || d.amount || 0), 0);
-  const depTotal = deps.reduce((sum, d) => sum + Number(d.amount || 0), 0);
-
-  const wds = Array.from(db.withdrawals.values());
-  const wdPending = wds.filter((w) => w.status === "pending").length;
-  const wdApproved = wds.filter((w) => w.status === "approved").length;
-  const wdPaidTotal = wds
-    .filter((w) => w.status === "paid")
-    .reduce((sum, w) => sum + Number(w.amount || 0), 0);
-  const wdTotal = wds.reduce((sum, w) => sum + Number(w.amount || 0), 0);
-
-  const kycPending = Array.from(db.kyc_records.values()).filter((k) => k.status === "pending").length;
-
-  const availableTotal = Array.from(db.wallets.values()).reduce(
-    (sum, w) => sum + Number(w.available_balance || 0),
-    0
-  );
-  const liabilities = availableTotal + activePrincipal;
-
-  const commsPaid = Array.from(db.referral_commissions.values())
-    .filter((c) => c.status === "paid")
-    .reduce((sum, c) => sum + Number(c.amount || 0), 0);
-
-  res.json({
-    users: { total: users.length, active: usersActive, suspended: usersSuspended },
-    investments: {
-      active: invActive,
-      matured: invMatured,
-      cancelled: invCancelled,
-      maturing_soon: invMaturingSoon,
-      active_principal: fmt(activePrincipal),
-    },
-    deposits: { pending: depPending, approved_total: fmt(depApprovedTotal), total: fmt(depTotal) },
-    withdrawals: { pending: wdPending, approved: wdApproved, paid_total: fmt(wdPaidTotal), total: fmt(wdTotal) },
-    kyc: { pending: kycPending },
-    wallet: {
-      available_total: fmt(availableTotal),
-      locked_total: fmt(activePrincipal),
-      liabilities: fmt(liabilities),
-    },
-    referrals: { commissions_paid: fmt(commsPaid) },
-  });
+api.get("/admin/overview", adminMiddleware, async (_req, res) => {
+  try {
+    const overview = await supabaseDb.getAdminOverview();
+    return res.json(overview);
+  } catch (err: any) {
+    console.error("[Admin Overview] Supabase fetch failed:", err?.message);
+    return res.status(503).json({ detail: "Admin overview data temporarily unavailable from authoritative database." });
+  }
 });
 
 // Admin Growth Analytics & Trends for Recharts Dashboard

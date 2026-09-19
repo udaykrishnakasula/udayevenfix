@@ -2,15 +2,15 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import api from "@/shared/lib/api";
 
 const DatabaseHealthContext = createContext({
-  isDatabaseHealthy: true,
-  isChecking: false,
+  isDatabaseHealthy: false,
+  isChecking: true,
   databaseError: null,
-  checkReadiness: async () => ({ ready: true }),
+  checkReadiness: async () => ({ ready: false }),
   markUnhealthy: () => {},
 });
 
 export function DatabaseHealthProvider({ children }) {
-  const [isDatabaseHealthy, setIsDatabaseHealthy] = useState(true);
+  const [isDatabaseHealthy, setIsDatabaseHealthy] = useState(false);
   const [isChecking, setIsChecking] = useState(true);
   const [databaseError, setDatabaseError] = useState(null);
   const checkingRef = useRef(false);
@@ -22,11 +22,16 @@ export function DatabaseHealthProvider({ children }) {
 
     try {
       const { data } = await api.get(`/health/readiness${force ? "?force=true" : ""}`, {
-        // Shorter timeout for health check so UI reacts swiftly
         timeout: 10000,
       });
 
-      if (data && data.ready) {
+      const isHealthy = Boolean(
+        data &&
+        data.ready === true &&
+        (data.database === "connected" || data.status === "ready")
+      );
+
+      if (isHealthy) {
         setIsDatabaseHealthy(true);
         setDatabaseError(null);
         return { ready: true };

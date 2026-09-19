@@ -1,6 +1,15 @@
-import { getSupabaseAdmin, isSupabaseAdminConfigured, getSupabaseServerClient, getResolvedSupabaseUrl, getResolvedAnonKey } from "./supabaseAdmin";
+import {
+  getSupabaseAdmin,
+  isSupabaseAdminConfigured,
+  isSupabaseServerConfigured,
+  getSupabaseServerClient,
+  getResolvedSupabaseUrl,
+  getResolvedAnonKey,
+  isAdminKeyVerified,
+  markAdminKeyInvalid,
+} from "./supabaseAdmin";
 import { transactionLocks } from "./transactionLocks";
-import crypto from "crypto";
+import * as crypto from "crypto";
 
 export interface CleanUserProfile {
   id: string;
@@ -83,6 +92,8 @@ function createNoopSupabaseClient(): any {
 
 export class SupabaseDbService {
   private static instance: SupabaseDbService | null = null;
+  private inMemoryLocks = new Map<string, { holderId: string; lockedUntil: number }>();
+  private inMemorySchedulerStates = new Map<string, any>();
 
   public static getInstance(): SupabaseDbService {
     if (!this.instance) {
@@ -96,11 +107,11 @@ export class SupabaseDbService {
   }
 
   public isConfigured(): boolean {
-    return isSupabaseAdminConfigured();
+    return isSupabaseServerConfigured();
   }
 
   private getClient(): any {
-    const client = getSupabaseAdmin();
+    const client = getSupabaseAdmin() || getSupabaseServerClient();
     if (!client) {
       return createNoopSupabaseClient();
     }
@@ -190,24 +201,7 @@ export class SupabaseDbService {
     const cleanName = params.name.trim();
 
     if (!this.isConfigured()) {
-      const localId = crypto.randomUUID();
-      const refCode = "EX" + crypto.randomBytes(3).toString("hex").toUpperCase();
-      const localUser: CleanUserProfile = {
-        id: localId,
-        name: cleanName,
-        email: cleanEmail,
-        phone: cleanPhone,
-        role: "user",
-        status: "active",
-        email_verified: true,
-        kyc_status: "none",
-        referral_code: refCode,
-        referred_by: params.referralCode ? params.referralCode : null,
-        two_factor_enabled: false,
-        created_at: new Date().toISOString(),
-        last_login_at: new Date().toISOString(),
-      };
-      return { user: localUser };
+      throw new Error("Supabase is not configured. Authoritative registration unavailable.");
     }
 
     const supabase = this.getClient();
@@ -466,17 +460,11 @@ export class SupabaseDbService {
   /* -------------------------------------------------------------------------- */
 
   public async getWallet(userId: string): Promise<any> {
-    if (!userId || !isUuid(userId) || !isSupabaseAdminConfigured()) {
-      return {
-        id: "local-wallet",
-        user_id: userId,
-        available_balance: 0,
-        total_invested: 0,
-        total_profit: 0,
-        total_deposited: 0,
-        total_withdrawn: 0,
-        pending_withdrawal: 0,
-      };
+    if (!isSupabaseAdminConfigured()) {
+      throw new Error("Supabase is not configured. Authoritative wallet access unavailable.");
+    }
+    if (!userId || !isUuid(userId)) {
+      throw new Error(`Invalid user ID for wallet lookup: ${userId}`);
     }
     const supabase = this.getClient();
     let { data: wallet, error } = await supabase
@@ -551,15 +539,11 @@ export class SupabaseDbService {
   }
 
   public async getWalletSummary(userId: string): Promise<WalletSummary> {
-    if (!userId || !isUuid(userId) || !isSupabaseAdminConfigured()) {
-      return {
-        currency: "USDT",
-        available_balance: "0.00",
-        locked_investment: "0.00",
-        total_portfolio: "0.00",
-        total_invested: "0.00",
-        total_earned: "0.00",
-      };
+    if (!isSupabaseAdminConfigured()) {
+      throw new Error("Supabase is not configured. Authoritative wallet summary unavailable.");
+    }
+    if (!userId || !isUuid(userId)) {
+      throw new Error(`Invalid user ID for wallet summary: ${userId}`);
     }
     const supabase = this.getClient();
     const wallet = await this.getWallet(userId);
@@ -859,6 +843,54 @@ export class SupabaseDbService {
       description: t.note,
       created_at: t.created_at,
     }));
+  }
+
+  public async getAllTransactions(options?: {
+    userId?: string;
+    type?: string;
+    direction?: string;
+    limit?: number;
+  }): Promise<any[]> {
+    if (!isSupabaseAdminConfigured()) return [];
+    const supabase = this.getClient();
+    let query = supabase
+      .from("wallet_transactions")
+      .select("*, profiles:user_id(name, email, phone)")
+      .order("created_at", { ascending: false })
+      .limit(options?.limit || 300);
+
+    if (options?.userId && isUuid(options.userId)) {
+      query = query.eq("user_id", options.userId);
+    }
+    if (options?.type) {
+      query = query.eq("type", options.type);
+    }
+    if (options?.direction) {
+      query = query.eq("direction", options.direction);
+    }
+
+    const { data, error } = await query;
+    if (error || !data) return [];
+    return data.map((t) => {
+      const uName = (t as any).profiles?.name || null;
+      const uEmail = (t as any).profiles?.email || null;
+      const uPhone = (t as any).profiles?.phone || null;
+      return {
+        id: t.id,
+        user_id: t.user_id,
+        type: t.type,
+        direction: t.direction,
+        amount: fmt(t.amount),
+        balance_after: fmt(t.balance_after),
+        ref_type: t.ref_type,
+        ref_id: t.ref_id,
+        status: t.status,
+        note: t.note,
+        description: t.note,
+        created_at: t.created_at,
+        user: { id: t.user_id, name: uName, email: uEmail, phone: uPhone },
+      };
+    });
   }
 
   /* -------------------------------------------------------------------------- */
@@ -1167,11 +1199,16 @@ export class SupabaseDbService {
       .order("created_at", { ascending: false });
 
     if (error || !data) return [];
-    return data.map((inv) => ({
-      ...this.serializeInvestment(inv),
-      user_name: (inv as any).profiles?.name || "Investor",
-      user_email: (inv as any).profiles?.email || "",
-    }));
+    return data.map((inv) => {
+      const uName = (inv as any).profiles?.name || "Investor";
+      const uEmail = (inv as any).profiles?.email || "";
+      return {
+        ...this.serializeInvestment(inv),
+        user_name: uName,
+        user_email: uEmail,
+        user: { name: uName, email: uEmail },
+      };
+    });
   }
 
   public async getInvestmentById(id: string): Promise<any | null> {
@@ -1184,10 +1221,13 @@ export class SupabaseDbService {
       .maybeSingle();
 
     if (error || !data) return null;
+    const uName = (data as any).profiles?.name || "Investor";
+    const uEmail = (data as any).profiles?.email || "";
     return {
       ...this.serializeInvestment(data),
-      user_name: (data as any).profiles?.name || "Investor",
-      user_email: (data as any).profiles?.email || "",
+      user_name: uName,
+      user_email: uEmail,
+      user: { name: uName, email: uEmail },
     };
   }
 
@@ -1244,60 +1284,83 @@ export class SupabaseDbService {
     ttlMs: number = 90000
   ): Promise<boolean> {
     if (!isSupabaseAdminConfigured()) return false;
-    const supabase = this.getClient();
     const now = Date.now();
+    const lockedUntil = now + ttlMs;
 
-    try {
-      const { data: currentLock, error } = await supabase
-        .from("platform_settings")
-        .select("value, updated_at")
-        .eq("key", lockKey)
-        .maybeSingle();
-
-      if (error) {
-        console.warn(`[SupabaseDb] Distributed lock query warning for ${lockKey}:`, error.message);
-        return false;
-      }
-
-      if (currentLock?.value) {
-        const val = currentLock.value as { locked_by?: string; locked_until?: number };
-        const lockedUntil = Number(val.locked_until || 0);
-        // If locked by another worker and lock has not expired, cannot acquire
-        if (val.locked_by && val.locked_by !== holderId && lockedUntil > now) {
-          return false;
-        }
-      }
-
-      // Lock is free, expired, or already held by us -> Acquire or renew lease
-      const lockedUntil = now + ttlMs;
-      const { error: upsertErr } = await supabase
-        .from("platform_settings")
-        .upsert({
-          key: lockKey,
-          value: {
-            locked_by: holderId,
-            locked_until: lockedUntil,
-            acquired_at: new Date(now).toISOString(),
-            last_heartbeat: new Date(now).toISOString(),
-          },
-          description: `Distributed lock for ${lockKey}`,
-          updated_at: new Date(now).toISOString(),
-        });
-
-      if (upsertErr) {
-        console.warn(`[SupabaseDb] Failed to acquire lock ${lockKey}:`, upsertErr.message);
-        return false;
-      }
-
-      return true;
-    } catch (err: any) {
-      console.warn(`[SupabaseDb] Lock acquisition exception for ${lockKey}:`, err?.message);
+    // 1. Process-level lock lease check
+    const localLock = this.inMemoryLocks.get(lockKey);
+    if (localLock && localLock.holderId !== holderId && localLock.lockedUntil > now) {
       return false;
     }
+
+    // 2. If Supabase admin service role key is verified, coordinate distributed lock via platform_settings
+    if (isAdminKeyVerified()) {
+      const supabase = this.getClient();
+      try {
+        const { data: currentLock, error } = await supabase
+          .from("platform_settings")
+          .select("value, updated_at")
+          .eq("key", lockKey)
+          .maybeSingle();
+
+        if (!error && currentLock?.value) {
+          const val = currentLock.value as { locked_by?: string; locked_until?: number };
+          const remoteUntil = Number(val.locked_until || 0);
+          if (val.locked_by && val.locked_by !== holderId && remoteUntil > now) {
+            return false;
+          }
+        }
+
+        const { error: upsertErr } = await supabase
+          .from("platform_settings")
+          .upsert({
+            key: lockKey,
+            value: {
+              locked_by: holderId,
+              locked_until: lockedUntil,
+              acquired_at: new Date(now).toISOString(),
+              last_heartbeat: new Date(now).toISOString(),
+            },
+            description: `Distributed lock for ${lockKey}`,
+            updated_at: new Date(now).toISOString(),
+          });
+
+        if (upsertErr) {
+          if (
+            upsertErr.message.includes("row-level security policy") ||
+            upsertErr.message.includes("permission denied")
+          ) {
+            // Service key doesn't bypass RLS on platform_settings; gracefully switch to in-process lease lock
+            markAdminKeyInvalid(`platform_settings write blocked by RLS (${upsertErr.message})`);
+            this.inMemoryLocks.set(lockKey, { holderId, lockedUntil });
+            return true;
+          }
+          console.warn(`[SupabaseDb] Failed to acquire lock ${lockKey}:`, upsertErr.message);
+          return false;
+        }
+
+        this.inMemoryLocks.set(lockKey, { holderId, lockedUntil });
+        return true;
+      } catch {
+        // Fallback to in-process lock lease
+        this.inMemoryLocks.set(lockKey, { holderId, lockedUntil });
+        return true;
+      }
+    }
+
+    // 3. Operating in standard mode: acquire local in-process lease safely
+    this.inMemoryLocks.set(lockKey, { holderId, lockedUntil });
+    return true;
   }
 
   public async releaseDistributedLock(lockKey: string, holderId: string): Promise<void> {
-    if (!isSupabaseAdminConfigured()) return;
+    const localLock = this.inMemoryLocks.get(lockKey);
+    if (localLock?.holderId === holderId) {
+      this.inMemoryLocks.delete(lockKey);
+    }
+
+    if (!isSupabaseAdminConfigured() || !isAdminKeyVerified()) return;
+
     const supabase = this.getClient();
     try {
       const { data: currentLock } = await supabase
@@ -1319,7 +1382,7 @@ export class SupabaseDbService {
           })
           .eq("key", lockKey);
       }
-    } catch (err: any) {
+    } catch {
       // Non-critical; lock lease TTL will naturally expire
     }
   }
@@ -1335,7 +1398,13 @@ export class SupabaseDbService {
       workerInstanceId: string;
     }
   ): Promise<void> {
-    if (!isSupabaseAdminConfigured()) return;
+    this.inMemorySchedulerStates.set(workerName, {
+      ...meta,
+      updated_at: new Date().toISOString(),
+    });
+
+    if (!isSupabaseAdminConfigured() || !isAdminKeyVerified()) return;
+
     const supabase = this.getClient();
     try {
       await supabase.from("platform_settings").upsert({
@@ -1353,18 +1422,20 @@ export class SupabaseDbService {
   }
 
   public async getSchedulerState(workerName: string): Promise<any | null> {
-    if (!isSupabaseAdminConfigured()) return null;
-    const supabase = this.getClient();
-    try {
-      const { data } = await supabase
-        .from("platform_settings")
-        .select("value")
-        .eq("key", `scheduler_state:${workerName}`)
-        .maybeSingle();
-      return data?.value || null;
-    } catch {
-      return null;
+    if (isSupabaseAdminConfigured() && isAdminKeyVerified()) {
+      const supabase = this.getClient();
+      try {
+        const { data } = await supabase
+          .from("platform_settings")
+          .select("value")
+          .eq("key", `scheduler_state:${workerName}`)
+          .maybeSingle();
+        if (data?.value) return data.value;
+      } catch {
+        // Fallback to in-memory state
+      }
     }
+    return this.inMemorySchedulerStates.get(workerName) || null;
   }
 
   public async matureInvestment(investmentId: string): Promise<any | null> {
@@ -1712,10 +1783,13 @@ export class SupabaseDbService {
     const results = [];
     for (const d of data) {
       const serialized = await this.serializeDeposit(d);
+      const uName = (d as any).profiles?.name || "Investor";
+      const uEmail = (d as any).profiles?.email || "";
       results.push({
         ...serialized,
-        user_name: (d as any).profiles?.name || "Investor",
-        user_email: (d as any).profiles?.email || "",
+        user_name: uName,
+        user_email: uEmail,
+        user: { name: uName, email: uEmail },
       });
     }
     return results;
@@ -2104,11 +2178,16 @@ export class SupabaseDbService {
 
     const { data, error } = await query;
     if (error || !data) return [];
-    return data.map((w) => ({
-      ...this.serializeWithdrawal(w),
-      user_name: (w as any).profiles?.name || "Investor",
-      user_email: (w as any).profiles?.email || "",
-    }));
+    return data.map((w) => {
+      const uName = (w as any).profiles?.name || "Investor";
+      const uEmail = (w as any).profiles?.email || "";
+      return {
+        ...this.serializeWithdrawal(w),
+        user_name: uName,
+        user_email: uEmail,
+        user: { name: uName, email: uEmail },
+      };
+    });
   }
 
   public async getWithdrawalById(id: string): Promise<any | null> {
@@ -2148,7 +2227,7 @@ export class SupabaseDbService {
 
   public async adminProcessWithdrawal(params: {
     withdrawalId: string;
-    action: "complete" | "reject" | "approve";
+    action: "complete" | "reject" | "approve" | "processing";
     adminId: string;
     adminEmail?: string;
     txHash?: string;
@@ -2198,6 +2277,28 @@ export class SupabaseDbService {
           .maybeSingle();
 
         if (uErr || !updatedW) throw new Error("Withdrawal is not pending or was already decided.");
+        return this.serializeWithdrawal(updatedW);
+      }
+
+      if (params.action === "processing") {
+        if (!["approved", "pending"].includes(currentW.status)) {
+          throw new Error(`Only pending or approved withdrawals can be set to processing. Current status: ${currentW.status}`);
+        }
+
+        const { data: updatedW, error: uErr } = await supabase
+          .from("withdrawals")
+          .update({
+            status: "processing",
+            processed_by: params.adminId.length === 36 ? params.adminId : null,
+            admin_note: params.reason || params.adminNote || null,
+            updated_at: nowStr,
+          })
+          .eq("id", params.withdrawalId)
+          .in("status", ["approved", "pending"])
+          .select()
+          .maybeSingle();
+
+        if (uErr || !updatedW) throw new Error("Withdrawal is not pending/approved or was already decided.");
         return this.serializeWithdrawal(updatedW);
       }
 
@@ -2529,11 +2630,15 @@ export class SupabaseDbService {
     const results = [];
     for (const k of data) {
       const serialized = await this.serializeKyc(k);
+      const uName = (k as any).profiles?.name || "Investor";
+      const uEmail = (k as any).profiles?.email || "";
+      const uPhone = (k as any).profiles?.phone || "";
       results.push({
         ...serialized,
-        user_name: (k as any).profiles?.name || "Investor",
-        user_email: (k as any).profiles?.email || "",
-        user_phone: (k as any).profiles?.phone || "",
+        user_name: uName,
+        user_email: uEmail,
+        user_phone: uPhone,
+        user: { name: uName, email: uEmail, phone: uPhone },
       });
     }
     return results;
@@ -2906,6 +3011,71 @@ export class SupabaseDbService {
     };
   }
 
+  public async getAllReferralsAdmin(): Promise<any> {
+    if (!isSupabaseAdminConfigured()) return { stats: {}, relationships: [], commissions: [] };
+    const supabase = this.getClient();
+    const [
+      { data: referrals },
+      { data: commissions },
+      { data: profiles },
+    ] = await Promise.all([
+      supabase.from("referrals").select("*, referrer:referrer_id(id, name, email), referee:referee_id(id, name, email)").order("created_at", { ascending: false }),
+      supabase.from("referral_commissions").select("*, referrer:referrer_id(id, name, email), referee:referee_id(id, name, email)").order("created_at", { ascending: false }),
+      supabase.from("profiles").select("id, name, email, referred_by, created_at"),
+    ]);
+
+    const profMap = new Map<string, any>();
+    for (const p of profiles || []) profMap.set(p.id, p);
+
+    let relationships: any[] = [];
+    if (referrals && referrals.length > 0) {
+      relationships = referrals.map((r: any) => ({
+        referrer: r.referrer || { id: r.referrer_id, name: profMap.get(r.referrer_id)?.name, email: profMap.get(r.referrer_id)?.email },
+        referee: r.referee || { id: r.referee_id, name: profMap.get(r.referee_id)?.name, email: profMap.get(r.referee_id)?.email },
+        joined_at: r.created_at,
+      }));
+    } else {
+      for (const p of profiles || []) {
+        if (p.referred_by && profMap.has(p.referred_by)) {
+          const ref = profMap.get(p.referred_by);
+          relationships.push({
+            referrer: { id: ref.id, name: ref.name, email: ref.email },
+            referee: { id: p.id, name: p.name, email: p.email },
+            joined_at: p.created_at,
+          });
+        }
+      }
+    }
+
+    const commsList = (commissions || []).map((c: any) => ({
+      id: c.id,
+      referrer: c.referrer || { id: c.referrer_id, name: profMap.get(c.referrer_id)?.name, email: profMap.get(c.referrer_id)?.email },
+      referee: c.referee || { id: c.referee_id, name: profMap.get(c.referee_id)?.name, email: profMap.get(c.referee_id)?.email },
+      investment_id: c.investment_id,
+      plan_key: c.plan_key,
+      amount: fmt(c.amount),
+      percentage: fmt(c.percentage || c.tier_percentage || 10),
+      status: c.status,
+      created_at: c.created_at,
+    }));
+
+    const totalPaid = commsList
+      .filter((c: any) => c.status === "paid")
+      .reduce((sum: number, c: any) => sum + Number(c.amount), 0);
+
+    return {
+      stats: {
+        total_relationships: relationships.length,
+        total_referrers: new Set(relationships.map((r: any) => r.referrer?.id).filter(Boolean)).size,
+        total_commissions: commsList.length,
+        total_commissions_paid: commsList.filter((c: any) => c.status === "paid").length,
+        total_commission_amount: fmt(totalPaid),
+      },
+      relationships,
+      commissions: commsList,
+    };
+  }
+
   /* -------------------------------------------------------------------------- */
   /*                               NOTIFICATIONS                                */
   /* -------------------------------------------------------------------------- */
@@ -3074,17 +3244,341 @@ export class SupabaseDbService {
   }
 
   public async updatePlatformSetting(key: string, value: any, adminId?: string): Promise<void> {
-    if (!isSupabaseAdminConfigured()) return;
+    if (!isSupabaseAdminConfigured() || !isAdminKeyVerified()) return;
     const supabase = this.getClient();
-    await supabase.from("platform_settings").upsert(
-      {
-        key,
-        value,
-        updated_by: adminId && adminId.length === 36 ? adminId : null,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "key" }
+    try {
+      await supabase.from("platform_settings").upsert(
+        {
+          key,
+          value,
+          updated_by: adminId && adminId.length === 36 ? adminId : null,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "key" }
+      );
+    } catch {
+      // Safe catch
+    }
+  }
+
+  /* -------------------------------------------------------------------------- */
+  /*                  ADMIN FINANCIAL & STATISTICAL OPERATIONS                  */
+  /* -------------------------------------------------------------------------- */
+
+  public async cancelInvestment(params: {
+    investmentId: string;
+    adminId: string;
+    adminEmail?: string;
+    refundAmount: number;
+    reason?: string;
+  }): Promise<any> {
+    if (!isSupabaseAdminConfigured()) return null;
+    const supabase = this.getClient();
+    const { data: inv, error } = await supabase
+      .from("investments")
+      .select("*")
+      .eq("id", params.investmentId)
+      .single();
+
+    if (error || !inv) throw new Error("Investment not found: " + params.investmentId);
+    if (inv.status !== "active") throw new Error(`Only active investments can be cancelled. Current status: ${inv.status}`);
+
+    const lockKeys = [`investment:${params.investmentId}`, `user:${inv.user_id}`];
+    return transactionLocks.withLock(lockKeys, async () => {
+      const nowStr = new Date().toISOString();
+      const refundAmt = Number(params.refundAmount || 0);
+
+      const { data: updatedInv, error: uErr } = await supabase
+        .from("investments")
+        .update({
+          status: "cancelled",
+          cancelled_at: nowStr,
+          cancelled_by: params.adminId && params.adminId.length === 36 ? params.adminId : null,
+          cancel_reason: params.reason || "Cancelled by administrator",
+          refund_amount: refundAmt,
+          updated_at: nowStr,
+        })
+        .eq("id", params.investmentId)
+        .eq("status", "active")
+        .select()
+        .single();
+
+      if (uErr || !updatedInv) throw new Error("Failed to cancel investment in database.");
+
+      if (refundAmt > 0) {
+        await this.creditWallet({
+          userId: inv.user_id,
+          amount: refundAmt,
+          type: "REFUND",
+          refType: "investments",
+          refId: inv.id,
+          idempotencyKey: `invest-cancel-refund:${inv.id}`,
+          note: `Investment cancelled — ${fmt(refundAmt)} USDT refunded`,
+          createdBy: params.adminId,
+        });
+      }
+
+      await this.createNotification({
+        userId: inv.user_id,
+        type: "investment",
+        channel: "both",
+        title: "Investment Cancelled",
+        body: `Your investment in ${inv.plan_name} was cancelled.${refundAmt > 0 ? ` $${fmt(refundAmt)} USDT refunded to your wallet.` : ""}`,
+        actionUrl: "/wallet",
+        actionText: "View Wallet",
+      });
+
+      await this.logAudit({
+        adminId: params.adminId,
+        adminEmail: params.adminEmail || "admin@easyx.trade",
+        action: "CANCEL_INVESTMENT",
+        entityType: "investments",
+        entityId: inv.id,
+        amount: refundAmt,
+        reason: params.reason || "Cancelled by administrator",
+      });
+
+      return this.serializeInvestment(updatedInv);
+    });
+  }
+
+  public async getAdminOverview(): Promise<any> {
+    if (!isSupabaseAdminConfigured()) throw new Error("Supabase is not configured.");
+    const supabase = this.getClient();
+
+    const [
+      { count: totalUsers },
+      { count: activeUsers },
+      { count: suspendedUsers },
+      { data: investments },
+      { data: deposits },
+      { data: withdrawals },
+      { count: kycPending },
+      { data: wallets },
+      { data: commissions },
+    ] = await Promise.all([
+      supabase.from("profiles").select("*", { count: "exact", head: true }).neq("role", "admin"),
+      supabase.from("profiles").select("*", { count: "exact", head: true }).neq("role", "admin").eq("status", "active"),
+      supabase.from("profiles").select("*", { count: "exact", head: true }).neq("role", "admin").eq("status", "suspended"),
+      supabase.from("investments").select("status, principal, maturity_at"),
+      supabase.from("payment_deposits").select("status, amount, approved_amount"),
+      supabase.from("withdrawals").select("status, amount"),
+      supabase.from("kyc_records").select("*", { count: "exact", head: true }).eq("status", "pending"),
+      supabase.from("wallets").select("available_balance"),
+      supabase.from("referral_commissions").select("amount, status"),
+    ]);
+
+    const nowMs = Date.now();
+    const sevenDaysMs = 7 * 86400 * 1000;
+    const invList = investments || [];
+    const invActive = invList.filter((i: any) => i.status === "active").length;
+    const invMatured = invList.filter((i: any) => i.status === "matured").length;
+    const invCancelled = invList.filter((i: any) => i.status === "cancelled").length;
+    const invMaturingSoon = invList.filter((i: any) => {
+      if (i.status !== "active" || !i.maturity_at) return false;
+      const diff = new Date(i.maturity_at).getTime() - nowMs;
+      return diff > 0 && diff <= sevenDaysMs;
+    }).length;
+    const activePrincipal = invList
+      .filter((i: any) => i.status === "active")
+      .reduce((sum: number, i: any) => sum + Number(i.principal || 0), 0);
+
+    const depList = deposits || [];
+    const depPending = depList.filter((d: any) => d.status === "pending").length;
+    const depApprovedTotal = depList
+      .filter((d: any) => d.status === "approved")
+      .reduce((sum: number, d: any) => sum + Number(d.approved_amount || d.amount || 0), 0);
+    const depTotal = depList.reduce((sum: number, d: any) => sum + Number(d.amount || 0), 0);
+
+    const wdList = withdrawals || [];
+    const wdPending = wdList.filter((w: any) => w.status === "pending").length;
+    const wdApproved = wdList.filter((w: any) => w.status === "approved").length;
+    const wdPaidTotal = wdList
+      .filter((w: any) => w.status === "completed" || w.status === "paid")
+      .reduce((sum: number, w: any) => sum + Number(w.amount || 0), 0);
+    const wdTotal = wdList.reduce((sum: number, w: any) => sum + Number(w.amount || 0), 0);
+
+    const availableTotal = (wallets || []).reduce(
+      (sum: number, w: any) => sum + Number(w.available_balance || 0),
+      0
     );
+    const liabilities = availableTotal + activePrincipal;
+
+    const commsPaid = (commissions || [])
+      .filter((c: any) => c.status === "paid")
+      .reduce((sum: number, c: any) => sum + Number(c.amount || 0), 0);
+
+    return {
+      users: { total: totalUsers || 0, active: activeUsers || 0, suspended: suspendedUsers || 0 },
+      investments: {
+        active: invActive,
+        matured: invMatured,
+        cancelled: invCancelled,
+        maturing_soon: invMaturingSoon,
+        active_principal: fmt(activePrincipal),
+      },
+      deposits: { pending: depPending, approved_total: fmt(depApprovedTotal), total: fmt(depTotal) },
+      withdrawals: { pending: wdPending, approved: wdApproved, paid_total: fmt(wdPaidTotal), total: fmt(wdTotal) },
+      kyc: { pending: kycPending || 0 },
+      wallet: {
+        available_total: fmt(availableTotal),
+        locked_total: fmt(activePrincipal),
+        liabilities: fmt(liabilities),
+      },
+      referrals: { commissions_paid: fmt(commsPaid) },
+    };
+  }
+
+  public async getAdminUsers(options?: { status?: string; query?: string }): Promise<any> {
+    if (!isSupabaseAdminConfigured()) throw new Error("Supabase is not configured.");
+    const supabase = this.getClient();
+
+    const [
+      { data: profiles, error: pErr },
+      { data: wallets },
+      { data: investments },
+      { data: referrals },
+      { data: commissions },
+    ] = await Promise.all([
+      supabase.from("profiles").select("*").order("created_at", { ascending: false }),
+      supabase.from("wallets").select("*"),
+      supabase.from("investments").select("id, user_id, principal, status"),
+      supabase.from("referrals").select("referrer_id, referee_id"),
+      supabase.from("referral_commissions").select("referrer_id, amount, status"),
+    ]);
+
+    if (pErr || !profiles) throw new Error("Failed to fetch user profiles: " + pErr?.message);
+
+    const walletMap = new Map<string, any>();
+    for (const w of wallets || []) walletMap.set(w.user_id, w);
+
+    const invMap = new Map<string, any[]>();
+    for (const i of investments || []) {
+      const list = invMap.get(i.user_id) || [];
+      list.push(i);
+      invMap.set(i.user_id, list);
+    }
+
+    const refMap = new Map<string, number>();
+    for (const r of referrals || []) {
+      refMap.set(r.referrer_id, (refMap.get(r.referrer_id) || 0) + 1);
+    }
+
+    const commMap = new Map<string, number>();
+    for (const c of commissions || []) {
+      if (c.status === "paid") {
+        commMap.set(c.referrer_id, (commMap.get(c.referrer_id) || 0) + Number(c.amount || 0));
+      }
+    }
+
+    let list = profiles.map((p) => {
+      const userClean = this.formatProfile(p);
+      const wallet = walletMap.get(p.id) || {
+        currency: "USDT",
+        available_balance: 0,
+        total_invested: 0,
+        total_profit: 0,
+      };
+      const invs = invMap.get(p.id) || [];
+      const activeInvs = invs.filter((i) => i.status === "active");
+      const activePrincipal = activeInvs.reduce((sum, i) => sum + Number(i.principal || 0), 0);
+      const directReferrals = refMap.get(p.id) || 0;
+      const commsEarned = commMap.get(p.id) || 0;
+
+      return {
+        ...userClean,
+        kyc_status: p.kyc_status || "none",
+        wallet: {
+          currency: wallet.currency || "USDT",
+          available_balance: fmt(wallet.available_balance),
+          locked_investment: fmt(activePrincipal),
+          total_invested: fmt(wallet.total_invested),
+          total_earned: fmt(wallet.total_profit || wallet.total_earned || 0),
+        },
+        investments: {
+          total: invs.length,
+          active: activeInvs.length,
+          active_principal: fmt(activePrincipal),
+          matured: invs.filter((i) => i.status === "matured").length,
+        },
+        referrals: {
+          total_referred: directReferrals,
+          commission_earned: fmt(commsEarned),
+        },
+      };
+    });
+
+    if (options?.status && options.status !== "all") {
+      list = list.filter((u) => u.status === options.status);
+    }
+
+    if (options?.query) {
+      const rx = options.query.trim().toLowerCase();
+      list = list.filter(
+        (u) =>
+          (u.name && u.name.toLowerCase().includes(rx)) ||
+          (u.email && u.email.toLowerCase().includes(rx)) ||
+          (u.phone && u.phone.toLowerCase().includes(rx)) ||
+          (u.referral_code && u.referral_code.toLowerCase().includes(rx)) ||
+          (u.id && u.id.toLowerCase().includes(rx)) ||
+          (u.kyc_status && u.kyc_status.toLowerCase().includes(rx))
+      );
+    }
+
+    return { total: list.length, users: list };
+  }
+
+  public async getAdminUserById(userId: string): Promise<any> {
+    if (!isSupabaseAdminConfigured()) throw new Error("Supabase is not configured.");
+    const supabase = this.getClient();
+
+    const [
+      { data: profile, error: pErr },
+      { data: wallet },
+      { data: investments },
+      { data: referrals },
+      { data: commissions },
+    ] = await Promise.all([
+      supabase.from("profiles").select("*").eq("id", userId).single(),
+      supabase.from("wallets").select("*").eq("user_id", userId).maybeSingle(),
+      supabase.from("investments").select("id, principal, status").eq("user_id", userId),
+      supabase.from("referrals").select("referee_id").eq("referrer_id", userId),
+      supabase.from("referral_commissions").select("amount, status").eq("referrer_id", userId),
+    ]);
+
+    if (pErr || !profile) return null;
+
+    const userClean = this.formatProfile(profile);
+    const w = wallet || { currency: "USDT", available_balance: 0, total_invested: 0, total_profit: 0 };
+    const invs = investments || [];
+    const activeInvs = invs.filter((i) => i.status === "active");
+    const activePrincipal = activeInvs.reduce((sum, i) => sum + Number(i.principal || 0), 0);
+    const directReferrals = (referrals || []).length;
+    const commsEarned = (commissions || [])
+      .filter((c) => c.status === "paid")
+      .reduce((sum, c) => sum + Number(c.amount || 0), 0);
+
+    return {
+      ...userClean,
+      kyc_status: profile.kyc_status || "none",
+      wallet: {
+        currency: w.currency || "USDT",
+        available_balance: fmt(w.available_balance),
+        locked_investment: fmt(activePrincipal),
+        total_invested: fmt(w.total_invested),
+        total_earned: fmt(w.total_profit || w.total_earned || 0),
+      },
+      investments: {
+        total: invs.length,
+        active: activeInvs.length,
+        active_principal: fmt(activePrincipal),
+        matured: invs.filter((i) => i.status === "matured").length,
+      },
+      referrals: {
+        total_referred: directReferrals,
+        commission_earned: fmt(commsEarned),
+      },
+    };
   }
 }
 

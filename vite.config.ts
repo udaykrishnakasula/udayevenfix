@@ -5,7 +5,26 @@ import path from "path";
 export default defineConfig(({ mode }) => {
   const isProd = mode === "production" || process.env.NODE_ENV === "production";
 
+  const resolvedClientUrl = (
+    process.env.VITE_SUPABASE_URL ||
+    process.env.SUPABASE_URL ||
+    process.env.PROJECT_URL ||
+    ""
+  )
+    .replace(/\/rest\/v1\/?$/, "")
+    .replace(/\/+$/, "");
+
+  const resolvedClientAnonKey =
+    process.env.VITE_SUPABASE_ANON_KEY ||
+    process.env.SUPABASE_ANON_KEY ||
+    process.env.PUBLIC_API_KEY ||
+    "";
+
   return {
+    define: {
+      "import.meta.env.VITE_SUPABASE_URL": JSON.stringify(resolvedClientUrl),
+      "import.meta.env.VITE_SUPABASE_ANON_KEY": JSON.stringify(resolvedClientAnonKey),
+    },
     plugins: [react()],
     resolve: {
       alias: {

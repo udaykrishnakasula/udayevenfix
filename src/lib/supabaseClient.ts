@@ -2,19 +2,36 @@ import { createClient, SupabaseClient } from "@supabase/supabase-js";
 
 // Client-side environment variables
 const env = (import.meta as any).env || {};
-const DEFAULT_SUPABASE_URL = "https://dgelzeodcpouuhytdoft.supabase.co";
-const DEFAULT_SUPABASE_ANON_KEY = "sb_publishable_7PdbztmR2T9f7mXOzqZrUw_PmTgHLFh";
+const DEFAULT_SUPABASE_URL = "";
+const DEFAULT_SUPABASE_ANON_KEY = "";
 
-const rawUrl = (env.VITE_SUPABASE_URL || DEFAULT_SUPABASE_URL).trim();
-const supabaseUrl = rawUrl.replace(/\/rest\/v1\/?$/, "").replace(/\/+$/, "");
-const supabaseAnonKey = (env.VITE_SUPABASE_ANON_KEY || DEFAULT_SUPABASE_ANON_KEY).trim();
+export function getResolvedClientUrl(): string {
+  const env = (import.meta as any).env || {};
+  const rawUrl = (
+    env.VITE_SUPABASE_URL ||
+    (typeof window !== "undefined" && (window as any).__EASYX_SUPABASE_URL__) ||
+    DEFAULT_SUPABASE_URL
+  ).trim();
+  return rawUrl.replace(/\/rest\/v1\/?$/, "").replace(/\/+$/, "");
+}
+
+export function getResolvedClientAnonKey(): string {
+  const env = (import.meta as any).env || {};
+  return (
+    env.VITE_SUPABASE_ANON_KEY ||
+    (typeof window !== "undefined" && (window as any).__EASYX_SUPABASE_ANON_KEY__) ||
+    DEFAULT_SUPABASE_ANON_KEY
+  ).trim();
+}
 
 export const isSupabaseConfigured = (): boolean => {
+  const url = getResolvedClientUrl();
+  const anonKey = getResolvedClientAnonKey();
   return Boolean(
-    supabaseUrl &&
-    supabaseAnonKey &&
-    supabaseUrl.startsWith("https://") &&
-    supabaseAnonKey.length > 20
+    url &&
+    anonKey &&
+    url.startsWith("https://") &&
+    anonKey.length > 20
   );
 };
 
@@ -24,8 +41,10 @@ export function getSupabaseClient(): SupabaseClient | null {
   if (!isSupabaseConfigured()) {
     return null;
   }
+  const url = getResolvedClientUrl();
+  const anonKey = getResolvedClientAnonKey();
   if (!clientInstance) {
-    clientInstance = createClient(supabaseUrl, supabaseAnonKey, {
+    clientInstance = createClient(url, anonKey, {
       auth: {
         persistSession: true,
         autoRefreshToken: true,
