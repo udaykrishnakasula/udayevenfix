@@ -126,9 +126,7 @@ Component Stack: ${errorInfo?.componentStack || "N/A"}`;
                   try {
                     const hasToken = typeof localStorage !== "undefined" && Boolean(localStorage.getItem("easyx_token"));
                     if (hasToken) {
-                      const rawUser = localStorage.getItem("easyx_user");
-                      const parsedUser = rawUser ? JSON.parse(rawUser) : null;
-                      target = parsedUser?.role === "admin" ? "/admin" : "/dashboard";
+                      target = "/dashboard";
                     }
                   } catch {
                     target = "/";

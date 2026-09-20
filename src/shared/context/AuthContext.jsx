@@ -3,7 +3,12 @@ import api, { clearToken, getToken, setToken } from "@/shared/lib/api";
 import { authDiagnostics, AUTH_TRANSITION } from "@/shared/analytics/authDiagnostics";
 import { getSupabaseClient, isSupabaseConfigured, subscribeToUserEvents } from "@/lib/supabaseClient";
 
-const CACHED_USER_KEY = "easyx_user";
+// Clean up any stale client profile cache from localStorage
+if (typeof localStorage !== "undefined") {
+  try {
+    localStorage.removeItem("easyx_user");
+  } catch {}
+}
 
 export const AUTH_STATE = {
   INITIALIZING: "INITIALIZING",
@@ -12,34 +17,10 @@ export const AUTH_STATE = {
   AUTH_ERROR: "AUTH_ERROR",
 };
 
-export function getCachedUser() {
-  if (typeof localStorage === "undefined") return null;
-  try {
-    const raw = localStorage.getItem(CACHED_USER_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-}
-
-export function setCachedUser(user) {
-  if (typeof localStorage === "undefined") return;
-  try {
-    if (user) {
-      localStorage.setItem(CACHED_USER_KEY, JSON.stringify(user));
-    } else {
-      localStorage.removeItem(CACHED_USER_KEY);
-    }
-  } catch {
-    // Ignore storage quota errors
-  }
-}
-
 const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
-  // Eagerly restore cached user if a token exists to eliminate initial flash or false unauthenticated state
-  const [user, setUser] = useState(() => (getToken() ? getCachedUser() : null));
+  const [user, setUser] = useState(null);
   const [authState, setAuthState] = useState(() =>
     getToken() ? AUTH_STATE.INITIALIZING : AUTH_STATE.UNAUTHENTICATED
   );
@@ -48,20 +29,18 @@ export function AuthProvider({ children }) {
     const token = getToken();
     if (!token) {
       setUser(null);
-      setCachedUser(null);
       setAuthState(AUTH_STATE.UNAUTHENTICATED);
       authDiagnostics.logTransition(AUTH_TRANSITION.AUTH_INITIALIZING, { status: "no_token" });
       return;
     }
 
     authDiagnostics.logTransition(AUTH_TRANSITION.AUTH_INITIALIZING, {
-      hasCachedUser: Boolean(getCachedUser()),
+      hasToken: true,
     });
 
     try {
       const { data } = await api.get("/auth/me");
       setUser(data);
-      setCachedUser(data);
       setAuthState(AUTH_STATE.AUTHENTICATED);
       authDiagnostics.logTransition(AUTH_TRANSITION.AUTHENTICATED, {
         userId: data.id,
@@ -74,26 +53,17 @@ export function AuthProvider({ children }) {
         // Genuine authentication expiration confirmed by server
         authDiagnostics.logTransition(AUTH_TRANSITION.SESSION_EXPIRED, { status: 401 });
         clearToken();
-        setCachedUser(null);
         setUser(null);
         setAuthState(AUTH_STATE.UNAUTHENTICATED);
       } else {
         // Network disruption, server restart/502/503, timeout, or offline
-        // CRITICAL: DO NOT CLEAR TOKEN OR LOG OUT THE USER. Keep session alive.
+        // Retain session token and report transient auth error
         authDiagnostics.logTransition(AUTH_TRANSITION.AUTH_ERROR, {
           status,
           message: error?.message || "Transient session verification failure",
           isOffline: typeof navigator !== "undefined" && !navigator.onLine,
         });
-
-        const cached = getCachedUser();
-        if (cached) {
-          setUser(cached);
-          // Retain authenticated usability using cached credentials
-          setAuthState(AUTH_STATE.AUTH_ERROR);
-        } else {
-          setAuthState(AUTH_STATE.AUTH_ERROR);
-        }
+        setAuthState(AUTH_STATE.AUTH_ERROR);
       }
     }
   }, []);
@@ -142,7 +112,6 @@ export function AuthProvider({ children }) {
     try {
       const { data } = await api.post("/auth/login", { email, password });
       setToken(data.access_token);
-      setCachedUser(data.user);
       setUser(data.user);
       setAuthState(AUTH_STATE.AUTHENTICATED);
       if (typeof sessionStorage !== "undefined") {
@@ -165,7 +134,6 @@ export function AuthProvider({ children }) {
     try {
       const { data } = await api.post("/auth/register", payload);
       setToken(data.access_token);
-      setCachedUser(data.user);
       setUser(data.user);
       setAuthState(AUTH_STATE.AUTHENTICATED);
       if (typeof sessionStorage !== "undefined") {
@@ -198,7 +166,6 @@ export function AuthProvider({ children }) {
       // Ignore network errors on explicit sign out
     } finally {
       clearToken();
-      setCachedUser(null);
       setUser(null);
       setAuthState(AUTH_STATE.UNAUTHENTICATED);
       if (typeof sessionStorage !== "undefined") {

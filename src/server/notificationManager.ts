@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { supabaseDb } from "./supabaseDb";
 import {
   type ReminderWorkflowConfig,
   type ReminderGlobalSettings,
@@ -157,8 +158,13 @@ export class NotificationManager {
   /**
    * Evaluate which users match a specific segment ID
    */
-  public evaluateSegmentUsers(segmentId: string): any[] {
-    const allUsers: any[] = Array.from(this.db.users.values()).filter((u: any) => u.role !== "admin");
+  public async evaluateSegmentUsers(segmentId: string): Promise<any[]> {
+    let allUsers: any[] = [];
+    try {
+      allUsers = (await supabaseDb.listAllUsers()).filter((u: any) => u.role !== "admin");
+    } catch (err: any) {
+      console.warn("[NotificationManager] Error fetching users from Supabase:", err?.message);
+    }
     const depositsList: any[] = Array.from(this.db.deposits.values());
     const investmentsList: any[] = Array.from(this.db.investments.values());
     const withdrawalsList: any[] = Array.from(this.db.withdrawals.values());
@@ -262,14 +268,16 @@ export class NotificationManager {
   /**
    * Get list of segments with live counts
    */
-  public getSegmentsWithCounts(): Array<AudienceSegmentDef & { count: number }> {
-    return AUDIENCE_SEGMENTS.map((seg) => {
-      const users = this.evaluateSegmentUsers(seg.id);
-      return {
-        ...seg,
-        count: users.length,
-      };
-    });
+  public async getSegmentsWithCounts(): Promise<Array<AudienceSegmentDef & { count: number }>> {
+    return Promise.all(
+      AUDIENCE_SEGMENTS.map(async (seg) => {
+        const users = await this.evaluateSegmentUsers(seg.id);
+        return {
+          ...seg,
+          count: users.length,
+        };
+      })
+    );
   }
 
   /**
@@ -289,7 +297,11 @@ export class NotificationManager {
     this.ensureInitialized();
     const { admin, userId, title, message, type, channel = "both", actionUrl, actionText, idempotencyKey } = params;
 
-    const targetUser = this.db.users.get(userId);
+    let targetUser: any = null;
+    try {
+      const p = await supabaseDb.getProfileById(userId);
+      if (p) targetUser = supabaseDb.formatProfile(p);
+    } catch {}
     if (!targetUser) {
       throw new Error("Target recipient user not found.");
     }
@@ -387,16 +399,24 @@ export class NotificationManager {
       if (!segmentId) throw new Error("Missing audience segment identifier.");
       const segDef = AUDIENCE_SEGMENTS.find((s) => s.id === segmentId);
       audienceName = segDef ? `${segDef.name} (${segDef.category})` : segmentId;
-      targetUsers = this.evaluateSegmentUsers(segmentId);
+      targetUsers = await this.evaluateSegmentUsers(segmentId);
     } else {
       if (!Array.isArray(userIds) || userIds.length === 0) {
         throw new Error("Please select at least one recipient user.");
       }
       // Deduplicate user IDs
       const uniqueIds = Array.from(new Set(userIds));
-      targetUsers = uniqueIds
-        .map((id) => this.db.users.get(id))
-        .filter((u) => u && u.role !== "admin");
+      const userProfiles = await Promise.all(
+        uniqueIds.map(async (id) => {
+          try {
+            const p = await supabaseDb.getProfileById(id);
+            return p ? supabaseDb.formatProfile(p) : null;
+          } catch {
+            return null;
+          }
+        })
+      );
+      targetUsers = userProfiles.filter((u: any) => u && u.role !== "admin");
       audienceName = `Manual selection (${targetUsers.length} users)`;
     }
 
@@ -599,7 +619,6 @@ export class NotificationManager {
     this.ensureInitialized();
     const unifiedLogs: UnifiedNotificationLog[] = this.db.unified_notification_logs || [];
     const reminderLogs: ReminderLogEntry[] = this.db.reminder_logs || [];
-    const allUsers: any[] = Array.from(this.db.users.values()).filter((u: any) => u.role !== "admin");
 
     // 1. Personalized metrics
     const personalizedLogs = unifiedLogs.filter((l) => l.mode === "personalized");
@@ -729,7 +748,7 @@ export class NotificationManager {
       overview: {
         total_dispatched: totalDispatched,
         push_subscribers: pushSubscribers,
-        total_users: allUsers.length,
+        total_users: pushSubscribers,
         overall_delivery_rate_pct: Number(
           (
             (inAppSent + pushSent) /

@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { supabaseDb } from "./supabaseDb";
 import {
   type ReminderWorkflowConfig,
   type ReminderGlobalSettings,
@@ -248,7 +249,12 @@ export class ReminderEngine {
     const globalSettings = this.getGlobalSettings();
     const workflows = this.getWorkflows().filter((w) => w.enabled);
 
-    const users: any[] = Array.from(this.db.users.values()).filter((u: any) => u.role !== "admin");
+    let users: any[] = [];
+    try {
+      users = (await supabaseDb.listAllUsers()).filter((u: any) => u.role !== "admin");
+    } catch (err: any) {
+      console.warn("[ReminderEngine] Notice fetching users from Supabase:", err?.message);
+    }
     const logs: ReminderLogEntry[] = this.db.reminder_logs;
 
     let remindersSent = 0;
@@ -462,9 +468,12 @@ export class ReminderEngine {
   /**
    * Analytics calculation for Admin Dashboard
    */
-  public getAnalytics() {
+  public async getAnalytics() {
     this.ensureInitialized();
-    const users = Array.from(this.db.users.values()).filter((u: any) => u.role !== "admin");
+    let users: any[] = [];
+    try {
+      users = (await supabaseDb.listAllUsers()).filter((u: any) => u.role !== "admin");
+    } catch {}
     const logs: ReminderLogEntry[] = this.db.reminder_logs || [];
     const workflows = this.getWorkflows();
 

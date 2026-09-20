@@ -1052,7 +1052,7 @@ const loadDatabase = () => {
     if (Array.isArray(parsed.api_request_logs)) {
       db.api_request_logs = parsed.api_request_logs;
     }
-    console.log(`[EasyX DB] Loaded ${db.users.size} users from disk persistence.`);
+    console.log(`[EasyX DB] Loaded settings and logs from disk persistence. Accounts and financial records are strictly authoritative in Supabase.`);
     return true;
   } catch (err) {
     console.error("[EasyX DB] Failed to load database from disk:", err);
@@ -1095,133 +1095,22 @@ const seedDatabase = async () => {
     }
   }
 
-  // 2. Sole Admin User: Strictly ONE email address is permitted to access the admin app
+  // 2. Sole Admin & Investor accounts are strictly authoritative in Supabase
   const soleAdminEmail = getSoleAdminEmail();
-  const adminPassword = process.env.ADMIN_PASSWORD || "Admin@Easyx2026";
-  const adminHash = await bcrypt.hash(adminPassword, 10);
-
   let adminProfile: any = null;
   try {
     adminProfile = await supabaseDb.getProfileByEmail(soleAdminEmail);
   } catch (err: any) {
     console.log("[EasyX DB] Supabase admin profile lookup note:", err?.message);
   }
-
   const designatedAdminId = adminProfile?.id || "2f472fc1-13c9-4a8a-8be6-060d4c7d28e7";
-
-  let soleAdmin = Array.from(db.users.values()).find(
-    (u) => u.email && u.email.toLowerCase().trim() === soleAdminEmail
-  );
-
-  // Clean up any legacy non-UUID admin ID in memory/disk
-  if (soleAdmin && !supabaseDb.isUuid(soleAdmin.id)) {
-    db.users.delete(soleAdmin.id);
-    soleAdmin.id = designatedAdminId;
-    db.users.set(designatedAdminId, soleAdmin);
-  }
-
-  for (const [k, u] of db.users.entries()) {
-    if (k.startsWith("admin-owner") || (u.email && u.email.toLowerCase().trim() === soleAdminEmail && !supabaseDb.isUuid(k))) {
-      db.users.delete(k);
-    }
-  }
-
-  if (!soleAdmin) {
-    const adminId = designatedAdminId;
-    soleAdmin = {
-      id: adminId,
-      name: adminProfile?.name || "Platform Owner Admin",
-      email: soleAdminEmail,
-      phone: adminProfile?.phone || "+919876500001",
-      password_hash: adminHash,
-      role: "admin",
-      email_verified: true,
-      kyc_status: "approved",
-      status: "active",
-      referral_code: adminProfile?.referral_code || "ADMINEX1",
-      referred_by: null,
-      created_at: ts,
-      last_login_at: null,
-    };
-    db.users.set(adminId, soleAdmin);
-    getOrCreateWallet(adminId);
-    console.log(`[EasyX DB] Initialized sole platform admin account: ${soleAdminEmail} (UUID: ${adminId})`);
-  } else {
-    soleAdmin.id = designatedAdminId;
-    soleAdmin.role = "admin";
-    if (!soleAdmin.password_hash) {
-      soleAdmin.password_hash = adminHash;
-    }
-    db.users.set(designatedAdminId, soleAdmin);
-  }
-
-  // 2c. Investor / User Account (coloursfaction@gmail.com -> User App)
-  const defaultInvestorEmail = "coloursfaction@gmail.com";
-  let investorProfile: any = null;
-  try {
-    investorProfile = await supabaseDb.getProfileByEmail(defaultInvestorEmail);
-  } catch (err: any) {
-    // ignore
-  }
-
-  const designatedInvestorId = investorProfile?.id || "8f31e909-06a2-4319-9db5-026192501552";
-
-  let investorUser = Array.from(db.users.values()).find(
-    (u) => u.email && u.email.toLowerCase().trim() === defaultInvestorEmail
-  );
-
-  if (investorUser && !supabaseDb.isUuid(investorUser.id)) {
-    db.users.delete(investorUser.id);
-    investorUser.id = designatedInvestorId;
-    db.users.set(designatedInvestorId, investorUser);
-  }
-
-  for (const [k, u] of db.users.entries()) {
-    if (k.startsWith("user-investor") || (u.email && u.email.toLowerCase().trim() === defaultInvestorEmail && !supabaseDb.isUuid(k))) {
-      db.users.delete(k);
-    }
-  }
-
-  const userPassword = process.env.USER_PASSWORD || "User@Easyx2026";
-  const userHash = await bcrypt.hash(userPassword, 10);
-  if (!investorUser) {
-    const investorId = designatedInvestorId;
-    investorUser = {
-      id: investorId,
-      name: investorProfile?.name || "Investor (Colours Faction)",
-      email: defaultInvestorEmail,
-      phone: investorProfile?.phone || "+919876500002",
-      password_hash: userHash,
-      role: "user",
-      email_verified: true,
-      kyc_status: "none",
-      status: "active",
-      referral_code: investorProfile?.referral_code || "COLORSEX1",
-      referred_by: null,
-      created_at: ts,
-      last_login_at: null,
-    };
-    db.users.set(investorUser.id, investorUser);
-    getOrCreateWallet(investorUser.id);
-    console.log(`[EasyX DB] Initialized primary user account: ${defaultInvestorEmail} (UUID: ${investorId})`);
-  } else {
-    investorUser.id = designatedInvestorId;
-    investorUser.role = "user";
-    if (!investorUser.password_hash) {
-      investorUser.password_hash = userHash;
-    }
-    if (!db.kyc_records.has(investorUser.id)) {
-      investorUser.kyc_status = "none";
-    }
-    db.users.set(designatedInvestorId, investorUser);
-  }
 
   // Clean initialization — No dummy users, fake investments, or mock transaction data
   if (db.audit_logs.length === 0) {
     db.audit_logs.push({
       id: genId(),
       action: "system.init",
-      actor_id: soleAdmin.id,
+      actor_id: designatedAdminId,
       actor_role: "admin",
       actor_email: soleAdminEmail,
       actor_name: "Platform Admin",
@@ -1257,172 +1146,7 @@ if (isSupabaseAdminConfigured()) {
 
 // ==================== WALLET & NOTIFICATION HELPERS ====================
 
-const getOrCreateWallet = (userId: string) => {
-  let w = db.wallets.get(userId);
-  if (!w) {
-    w = {
-      id: genId(),
-      user_id: userId,
-      currency: "USDT",
-      available_balance: "0.00",
-      total_invested: "0.00",
-      total_earned: "0.00",
-      version: 0,
-      created_at: nowIso(),
-      updated_at: nowIso(),
-    };
-    db.wallets.set(userId, w);
-  }
-
-  // Self-heal and reconcile wallet available_balance from approved deposits
-  let approvedDepositTotal = 0;
-  for (const dep of db.deposits.values()) {
-    if (dep.user_id === userId && dep.status === "approved") {
-      approvedDepositTotal += Number(dep.approved_amount || dep.amount || 0);
-    }
-  }
-  let investedTotal = 0;
-  for (const inv of db.investments.values()) {
-    if (inv.user_id === userId && (inv.status === "active" || inv.status === "completed")) {
-      investedTotal += Number(inv.principal || 0);
-    }
-  }
-  let withdrawalTotal = 0;
-  for (const withdr of db.withdrawals.values()) {
-    if (withdr.user_id === userId && (withdr.status === "approved" || withdr.status === "completed")) {
-      withdrawalTotal += Number(withdr.amount || 0);
-    }
-  }
-
-  const netAvailable = Math.max(0, approvedDepositTotal - investedTotal - withdrawalTotal);
-  if (Number(w.available_balance || 0) < netAvailable) {
-    w.available_balance = fmt(netAvailable);
-    if (!w.total_deposited || Number(w.total_deposited) < approvedDepositTotal) {
-      w.total_deposited = fmt(approvedDepositTotal);
-    }
-    w.updated_at = nowIso();
-    saveDatabase();
-  }
-
-  return w;
-};
-
-const creditWallet = async (
-  userId: string,
-  amountStr: string,
-  txType: string,
-  refType?: string,
-  refId?: string,
-  idempotencyKey?: string,
-  note?: string,
-  incTotalEarned?: string
-) => {
-  const amt = Number(amountStr);
-  if (amt <= 0) throw new Error("Amount must be positive");
-
-  if (idempotencyKey) {
-    for (const tx of db.wallet_transactions.values()) {
-      if (tx.idempotency_key === idempotencyKey) return tx;
-    }
-  }
-
-  const wallet = getOrCreateWallet(userId);
-  const curBal = Number(wallet.available_balance);
-  const newBal = curBal + amt;
-  wallet.available_balance = fmt(newBal);
-  wallet.version += 1;
-  wallet.updated_at = nowIso();
-
-  if (incTotalEarned) {
-    wallet.total_earned = fmt(Number(wallet.total_earned || 0) + Number(incTotalEarned));
-  }
-
-  const txId = genId();
-  const txDoc = {
-    id: txId,
-    wallet_id: wallet.id,
-    user_id: userId,
-    type: txType,
-    direction: "credit",
-    amount: fmt(amt),
-    balance_after: fmt(newBal),
-    ref_type: refType || null,
-    ref_id: refId || null,
-    status: "completed",
-    idempotency_key: idempotencyKey || null,
-    note: note || "",
-    created_at: nowIso(),
-    created_by: userId,
-  };
-  db.wallet_transactions.set(txId, txDoc);
-  saveDatabase(true);
-  return txDoc;
-};
-
-const debitWallet = async (
-  userId: string,
-  amountStr: string,
-  txType: string,
-  refType?: string,
-  refId?: string,
-  idempotencyKey?: string,
-  note?: string,
-  incTotalInvested?: string
-) => {
-  const amt = Number(amountStr);
-  if (amt <= 0) throw new Error("Amount must be positive");
-
-  if (idempotencyKey) {
-    for (const tx of db.wallet_transactions.values()) {
-      if (tx.idempotency_key === idempotencyKey) return tx;
-    }
-  }
-
-  const wallet = getOrCreateWallet(userId);
-  const curBal = Number(wallet.available_balance);
-  if (curBal < amt) {
-    const err: any = new Error("Insufficient wallet balance.");
-    err.status = 402;
-    err.detail = {
-      code: "insufficient_balance",
-      message: "Insufficient wallet balance.",
-      required: fmt(amt),
-      available: fmt(curBal),
-    };
-    throw err;
-  }
-
-  const newBal = curBal - amt;
-  wallet.available_balance = fmt(newBal);
-  wallet.version += 1;
-  wallet.updated_at = nowIso();
-
-  if (incTotalInvested) {
-    wallet.total_invested = fmt(Number(wallet.total_invested || 0) + Number(incTotalInvested));
-  }
-
-  const txId = genId();
-  const txDoc = {
-    id: txId,
-    wallet_id: wallet.id,
-    user_id: userId,
-    type: txType,
-    direction: "debit",
-    amount: fmt(amt),
-    balance_after: fmt(newBal),
-    ref_type: refType || null,
-    ref_id: refId || null,
-    status: "completed",
-    idempotency_key: idempotencyKey || null,
-    note: note || "",
-    created_at: nowIso(),
-    created_by: userId,
-  };
-  db.wallet_transactions.set(txId, txDoc);
-  saveDatabase(true);
-  return txDoc;
-};
-
+// All wallet balances, ledger records, and mutations are authoritative and managed strictly in Supabase.
 const createNotification = (
   userId: string,
   ntype: string,
@@ -1468,14 +1192,12 @@ const notifyAdmins = (
   extraMeta?: any,
   dedupeKeyPrefix?: string
 ) => {
-  const adminUsers = Array.from(db.users.values()).filter((u) => u.role === "admin");
-  for (const admin of adminUsers) {
-    const dKey = dedupeKeyPrefix ? `${dedupeKeyPrefix}:${admin.id}` : undefined;
-    createNotification(admin.id, ntype, title, body, dKey, undefined, {
-      ...extraMeta,
-      is_admin_event: true,
-    });
-  }
+  const adminId = "2f472fc1-13c9-4a8a-8be6-060d4c7d28e7";
+  const dKey = dedupeKeyPrefix ? `${dedupeKeyPrefix}:${adminId}` : undefined;
+  createNotification(adminId, ntype, title, body, dKey, undefined, {
+    ...extraMeta,
+    is_admin_event: true,
+  });
 
   // Also broadcast to connected admin streams
   realtimeManager.notifyAdminEvent({
@@ -1502,9 +1224,7 @@ supportManager.seedDefaultFaqs();
 const supportAiService = new SupportAiService(db, supportManager);
 
 const getUserSafe = (userId: string) => {
-  const u = db.users.get(userId);
-  if (!u) return { id: userId, name: "Unknown User", email: "N/A", phone: "N/A", referral_code: "N/A" };
-  return { id: u.id, name: u.name, email: u.email, phone: u.phone, referral_code: u.referral_code };
+  return { id: userId, name: "User", email: "N/A", phone: "N/A", referral_code: "N/A" };
 };
 
 const logAudit = (action: string, actor: any, entityType?: string, entityId?: string, meta?: any) => {
@@ -1532,32 +1252,8 @@ const logAudit = (action: string, actor: any, entityType?: string, entityId?: st
   let targetUserEmail = meta?.user_email || meta?.target_user_email || null;
 
   if (!targetUserId && entityType && entityId) {
-    if (entityType === "deposit") {
-      const dep = db.deposits.get(entityId);
-      if (dep) targetUserId = dep.user_id;
-    } else if (entityType === "withdrawal") {
-      const w = db.withdrawals.get(entityId);
-      if (w) targetUserId = w.user_id;
-    } else if (entityType === "kyc_record") {
-      for (const k of db.kyc_records.values()) {
-        if (k.id === entityId) {
-          targetUserId = k.user_id;
-          break;
-        }
-      }
-    } else if (entityType === "user") {
+    if (entityType === "user") {
       targetUserId = entityId;
-    } else if (entityType === "investment") {
-      const inv = db.investments.get(entityId);
-      if (inv) targetUserId = inv.user_id;
-    }
-  }
-
-  if (targetUserId && (!targetUserName || !targetUserEmail)) {
-    const u = db.users.get(targetUserId);
-    if (u) {
-      targetUserName = targetUserName || u.name;
-      targetUserEmail = targetUserEmail || u.email;
     }
   }
 
@@ -1659,35 +1355,32 @@ const authMiddleware = async (req: Request, res: Response, next: NextFunction) =
     let profile: any = null;
     let resolvedUserId = userId;
 
-    if (supabaseDb.isUuid(resolvedUserId)) {
-      profile = await supabaseDb.getProfileById(resolvedUserId);
-    } else {
-      // Legacy token or custom prefix
-      if (resolvedUserId.startsWith("admin-owner") || resolvedUserId.toLowerCase().includes("admin")) {
-        profile = await supabaseDb.getProfileByEmail(getSoleAdminEmail());
+    try {
+      if (supabaseDb.isUuid(resolvedUserId)) {
+        profile = await supabaseDb.getProfileById(resolvedUserId);
       } else {
-        const local = db.users.get(resolvedUserId);
-        if (local?.email) {
-          profile = await supabaseDb.getProfileByEmail(local.email);
+        // Sole admin lookup or email-based resolution
+        if (resolvedUserId.startsWith("admin-owner") || resolvedUserId.toLowerCase().includes("admin")) {
+          profile = await supabaseDb.getProfileByEmail(getSoleAdminEmail());
         } else if (userEmail) {
           profile = await supabaseDb.getProfileByEmail(userEmail);
         }
+        if (profile?.id) {
+          resolvedUserId = profile.id;
+        }
       }
-      if (profile?.id) {
-        resolvedUserId = profile.id;
+
+      if (!profile && userEmail) {
+        profile = await supabaseDb.getProfileByEmail(userEmail);
+        if (profile?.id) resolvedUserId = profile.id;
       }
+    } catch (dbErr: any) {
+      console.error("[EasyX Auth Middleware] Authoritative Supabase profile lookup error:", dbErr?.message);
+      return res.status(503).json({ detail: "Authentication database temporarily unavailable. Please try again." });
     }
 
-    if (!profile && userEmail) {
-      profile = await supabaseDb.getProfileByEmail(userEmail);
-      if (profile?.id) resolvedUserId = profile.id;
-    }
     if (!profile) {
-      profile = db.users.get(userId) || db.users.get(resolvedUserId);
-    }
-
-    if (!profile) {
-      return res.status(401).json({ detail: "User not found" });
+      return res.status(401).json({ detail: "User not found or account no longer exists in authoritative database." });
     }
 
     if (profile.status === "suspended" || profile.status === "banned") {
@@ -1697,8 +1390,6 @@ const authMiddleware = async (req: Request, res: Response, next: NextFunction) =
 
     const clean = supabaseDb.formatProfile(profile);
     (req as any).user = clean;
-    // Mirror in local db for any legacy utilities
-    db.users.set(clean.id, clean);
     next();
   } catch (err: any) {
     return res.status(401).json({ detail: "Authentication failed: " + err.message });
@@ -1730,23 +1421,29 @@ const optionalAuthMiddleware = async (req: Request, res: Response, next: NextFun
       }
       if (userId) {
         let profile: any = null;
-        if (supabaseDb.isUuid(userId)) {
-          profile = await supabaseDb.getProfileById(userId);
-        } else {
-          if (userId.startsWith("admin-owner") || userId.toLowerCase().includes("admin")) {
-            profile = await supabaseDb.getProfileByEmail(getSoleAdminEmail());
+        try {
+          if (supabaseDb.isUuid(userId)) {
+            profile = await supabaseDb.getProfileById(userId);
           } else {
-            const local = db.users.get(userId);
-            if (local?.email) {
-              profile = await supabaseDb.getProfileByEmail(local.email);
+            if (userId.startsWith("admin-owner") || userId.toLowerCase().includes("admin")) {
+              profile = await supabaseDb.getProfileByEmail(getSoleAdminEmail());
             }
           }
+          if (!profile) {
+            const admin = getSupabaseAdmin();
+            if (admin) {
+              const { data: uData } = await admin.auth.admin.getUserById(userId);
+              if (uData?.user?.email) {
+                profile = await supabaseDb.getProfileByEmail(uData.user.email);
+              }
+            }
+          }
+        } catch {
+          // Ignored for optional auth
         }
-        if (!profile) profile = db.users.get(userId);
         if (profile && profile.status !== "suspended" && profile.status !== "banned") {
           const clean = supabaseDb.formatProfile(profile);
           (req as any).user = clean;
-          db.users.set(clean.id, clean);
         }
       }
     } catch {
@@ -1786,30 +1483,6 @@ const cleanUser = (u: any) => {
   delete copy.auth_tokens;
   delete copy.temp_token;
   return copy;
-};
-
-const computeLocked = (userId: string) => {
-  let locked = 0;
-  for (const inv of db.investments.values()) {
-    if (inv.user_id === userId && inv.status === "active") {
-      locked += Number(inv.principal || 0);
-    }
-  }
-  return locked;
-};
-
-const getWalletSummary = (userId: string) => {
-  const w = getOrCreateWallet(userId);
-  const available = Number(w.available_balance || 0);
-  const locked = computeLocked(userId);
-  return {
-    currency: w.currency || "USDT",
-    available_balance: fmt(available),
-    locked_investment: fmt(locked),
-    total_portfolio: fmt(available + locked),
-    total_invested: fmt(w.total_invested || 0),
-    total_earned: fmt(w.total_earned || 0),
-  };
 };
 
 const getRemainingDays = (maturityAt?: string) => {
@@ -1898,24 +1571,29 @@ const runMaturitySweep = async () => {
 const runReminderSweep = async () => {
   let created = 0;
   const now = Date.now();
-  for (const inv of db.investments.values()) {
-    if (inv.status === "active" && inv.maturity_at) {
-      const diffDays = (new Date(inv.maturity_at).getTime() - now) / 86400000;
-      for (const d of [7, 3, 1]) {
-        if (d - 1 < diffDays && diffDays <= d) {
-          const label = `${d} day${d > 1 ? "s" : ""}`;
-          const ok = createNotification(
-            inv.user_id,
-            "maturity_reminder",
-            `Investment matures in ${label}`,
-            `Your ${inv.plan_name} matures in ${label}. Expected payout ${fmt(inv.maturity_amount)} USDT.`,
-            `reminder-${d}:${inv.id}`,
-            inv.id
-          );
-          if (ok) created++;
+  try {
+    const investments = await supabaseDb.getAllInvestments();
+    for (const inv of investments) {
+      if (inv.status === "active" && inv.maturity_at) {
+        const diffDays = (new Date(inv.maturity_at).getTime() - now) / 86400000;
+        for (const d of [7, 3, 1]) {
+          if (d - 1 < diffDays && diffDays <= d) {
+            const label = `${d} day${d > 1 ? "s" : ""}`;
+            const ok = createNotification(
+              inv.user_id,
+              "maturity_reminder",
+              `Investment matures in ${label}`,
+              `Your ${inv.plan_name} matures in ${label}. Expected payout ${fmt(inv.maturity_amount)} USDT.`,
+              `reminder-${d}:${inv.id}`,
+              inv.id
+            );
+            if (ok) created++;
+          }
         }
       }
     }
+  } catch (err: any) {
+    console.warn("[Maturity Reminders] Authoritative sweep error:", err?.message);
   }
   return { reminders_created: created };
 };
@@ -2142,11 +1820,13 @@ api.post("/auth/check-phone", async (req, res) => {
     return res.status(422).json({ detail: "Enter a valid Indian mobile number." });
   }
 
-  for (const u of db.users.values()) {
-    const uPhone = normalizeIndianMobileNumber(u.phone);
-    if (uPhone && uPhone === cleanPhone) {
+  try {
+    const existing = await supabaseDb.getProfileByPhone(cleanPhone);
+    if (existing) {
       return res.status(409).json({ detail: "An account with this mobile number already exists." });
     }
+  } catch (err: any) {
+    console.warn("[EasyX Auth] check-phone Supabase check error:", err?.message);
   }
 
   return res.json({ available: true, message: "Mobile number is available." });
@@ -2189,17 +1869,20 @@ api.post("/auth/register", registerLimiter, async (req, res) => {
     return res.status(422).json({ detail: "Password must include both uppercase and lowercase letters." });
   }
 
-  // Validate email and phone uniqueness (case-insensitive, normalized)
-  for (const u of db.users.values()) {
-    if (u.email && u.email.trim().toLowerCase() === cleanEmail) {
-      console.warn(`[EasyX Auth] Registration rejected: Email '${cleanEmail}' is already registered by user ID ${u.id}.`);
+  // Validate email and phone uniqueness in Supabase
+  try {
+    const existingEmail = await supabaseDb.getProfileByEmail(cleanEmail);
+    if (existingEmail) {
+      console.warn(`[EasyX Auth] Registration rejected: Email '${cleanEmail}' is already registered in Supabase.`);
       return res.status(409).json({ detail: "Email is already registered." });
     }
-    const uPhone = normalizeIndianMobileNumber(u.phone);
-    if (uPhone && uPhone === cleanPhone) {
-      console.warn(`[EasyX Auth] Registration rejected: Phone '${cleanPhone}' is already registered by user ID ${u.id}.`);
+    const existingPhone = await supabaseDb.getProfileByPhone(cleanPhone);
+    if (existingPhone) {
+      console.warn(`[EasyX Auth] Registration rejected: Phone '${cleanPhone}' is already registered in Supabase.`);
       return res.status(409).json({ detail: "An account with this mobile number already exists." });
     }
+  } catch (err: any) {
+    console.error("[EasyX Auth] Uniqueness check error:", err?.message);
   }
 
   try {
@@ -2210,15 +1893,6 @@ api.post("/auth/register", registerLimiter, async (req, res) => {
       phone: cleanPhone,
       referralCode: referral_code ? String(referral_code).trim() : null,
     });
-
-    // Hash password for local fallback compatibility
-    const hashedPassword = await bcrypt.hash(rawPassword, 10);
-    (registeredUser as any).password_hash = hashedPassword;
-
-    // Mirror in local db for compatibility
-    db.users.set(registeredUser.id, registeredUser);
-    getOrCreateWallet(registeredUser.id);
-    saveDatabase();
 
     // Send production email verification via authoritative otpService (Supabase backed)
     try {
@@ -2294,7 +1968,7 @@ api.post("/auth/login", loginLimiter, async (req, res) => {
   let authedUser: any = null;
   let sessionToken: string | null = null;
 
-  // 1. Check with Supabase Auth
+  // Supabase Auth authentication ONLY
   try {
     const authRes = await supabaseDb.authenticateUser({
       email: cleanEmail,
@@ -2305,54 +1979,8 @@ api.post("/auth/login", loginLimiter, async (req, res) => {
       sessionToken = authRes.session?.access_token || null;
     }
   } catch (authErr: any) {
-    console.log(`[EasyX Auth] Supabase Auth sign-in message: ${authErr.message}`);
-  }
-
-  // 2. Master fallback for authorized admin owner, designated investors, or standard master passwords
-  if (!authedUser) {
-    if (isSoleAdminEmail && isMasterAdminPasswordMatch) {
-      const p = await supabaseDb.getProfileByEmail(cleanEmail);
-      if (p) {
-        authedUser = supabaseDb.formatProfile(p);
-      } else {
-        authedUser = Array.from(db.users.values()).find(
-          (u) => u.email && u.email.trim().toLowerCase() === cleanEmail
-        );
-      }
-    } else if (isDesignatedInvestorPasswordMatch) {
-      const p = await supabaseDb.getProfileByEmail(cleanEmail);
-      if (p) {
-        authedUser = supabaseDb.formatProfile(p);
-      } else {
-        authedUser = Array.from(db.users.values()).find(
-          (u) => u.email && u.email.trim().toLowerCase() === cleanEmail
-        );
-      }
-    } else if (isMasterUserPasswordMatch) {
-      const p = await supabaseDb.getProfileByEmail(cleanEmail);
-      if (p) {
-        authedUser = supabaseDb.formatProfile(p);
-      } else {
-        authedUser = Array.from(db.users.values()).find(
-          (u) => u.email && u.email.trim().toLowerCase() === cleanEmail
-        );
-      }
-    }
-  }
-
-  // 3. Fallback to local db if Supabase user was not found
-  if (!authedUser) {
-    for (const u of db.users.values()) {
-      if (u.email && u.email.trim().toLowerCase() === cleanEmail) {
-        if (u.password_hash) {
-          const match = await bcrypt.compare(password, u.password_hash);
-          if (match) authedUser = u;
-        } else if (isMasterUserPasswordMatch || isMasterAdminPasswordMatch) {
-          authedUser = u;
-        }
-        break;
-      }
-    }
+    console.warn(`[EasyX Auth] Supabase Auth sign-in rejected for '${cleanEmail}': ${authErr?.message}`);
+    return res.status(401).json({ detail: "Invalid email or password. If you don't have an account, please sign up." });
   }
 
   if (!authedUser) {
@@ -2368,30 +1996,10 @@ api.post("/auth/login", loginLimiter, async (req, res) => {
   // Ensure role is admin if designated sole admin email
   if (isSoleAdminEmail && authedUser.role !== "admin") {
     authedUser.role = "admin";
-  }
-
-  // Ensure authedUser.id is a valid UUID
-  if (!supabaseDb.isUuid(authedUser.id)) {
-    const p = await supabaseDb.getProfileByEmail(cleanEmail);
-    if (p?.id && supabaseDb.isUuid(p.id)) {
-      db.users.delete(authedUser.id);
-      authedUser = supabaseDb.formatProfile(p);
-    } else if (isSoleAdminEmail) {
-      db.users.delete(authedUser.id);
-      authedUser.id = "2f472fc1-13c9-4a8a-8be6-060d4c7d28e7";
-    }
-  }
-
-  authedUser.last_login_at = nowIso();
-  if (!authedUser.password_hash) {
     try {
-      authedUser.password_hash = await bcrypt.hash(password, 10);
-    } catch {
-      // ignore
-    }
+      await supabaseDb.updateProfile(authedUser.id, { role: "admin" });
+    } catch {}
   }
-  db.users.set(authedUser.id, authedUser);
-  getOrCreateWallet(authedUser.id);
 
   if (authedUser.role === "admin") {
     logAudit("admin.login", authedUser, "user", authedUser.id, { ip: req.ip });
@@ -2434,20 +2042,11 @@ api.post("/auth/resend-verification", emailVerificationLimiter, async (req, res)
   const cleanEmail = String(email).trim().toLowerCase();
 
   let user: any = null;
-  for (const u of db.users.values()) {
-    if (u.email && u.email.trim().toLowerCase() === cleanEmail) {
-      user = u;
-      break;
-    }
-  }
-
-  if (!user && isSupabaseAdminConfigured()) {
-    try {
-      const p = await supabaseDb.getProfileByEmail(cleanEmail);
-      if (p) user = supabaseDb.formatProfile(p);
-    } catch {
-      // ignore
-    }
+  try {
+    const p = await supabaseDb.getProfileByEmail(cleanEmail);
+    if (p) user = supabaseDb.formatProfile(p);
+  } catch {
+    // ignore
   }
 
   // Prevent email enumeration
@@ -2500,20 +2099,11 @@ api.post("/auth/send-verification-email", emailVerificationLimiter, async (req, 
   const cleanEmail = String(email).trim().toLowerCase();
 
   let user: any = null;
-  for (const u of db.users.values()) {
-    if (u.email && u.email.trim().toLowerCase() === cleanEmail) {
-      user = u;
-      break;
-    }
-  }
-
-  if (!user && isSupabaseAdminConfigured()) {
-    try {
-      const p = await supabaseDb.getProfileByEmail(cleanEmail);
-      if (p) user = supabaseDb.formatProfile(p);
-    } catch {
-      // ignore
-    }
+  try {
+    const p = await supabaseDb.getProfileByEmail(cleanEmail);
+    if (p) user = supabaseDb.formatProfile(p);
+  } catch {
+    // ignore
   }
 
   if (!user) {
@@ -2570,32 +2160,19 @@ api.post("/auth/verify-email", emailVerificationLimiter, async (req, res) => {
     const targetEmail = verifyResult.session.email || cleanEmail;
     let verifiedUser: any = null;
 
-    // Find and update user in local memory DB
-    for (const u of db.users.values()) {
-      if (u.email && u.email.trim().toLowerCase() === targetEmail.toLowerCase()) {
-        u.email_verified = true;
-        u.updated_at = nowIso();
-        verifiedUser = u;
-        break;
-      }
-    }
-
     // Persist verified status to Supabase profiles
-    if (isSupabaseAdminConfigured()) {
-      try {
-        const p = await supabaseDb.getProfileByEmail(targetEmail);
-        if (p?.id) {
-          await supabaseDb.updateProfile(p.id, { email_verified: true });
-          if (!verifiedUser) verifiedUser = supabaseDb.formatProfile(p);
-        }
-      } catch (sbErr: any) {
-        console.warn("[EasyX Auth] Supabase profile verify update notice:", sbErr.message);
+    try {
+      const p = await supabaseDb.getProfileByEmail(targetEmail);
+      if (p?.id) {
+        const updated = await supabaseDb.updateProfile(p.id, { email_verified: true });
+        verifiedUser = supabaseDb.formatProfile(updated || p);
       }
+    } catch (sbErr: any) {
+      console.warn("[EasyX Auth] Supabase profile verify update notice:", sbErr.message);
     }
 
     // Consume OTP session
     await otpService.consumeOtp("SIGNUP", verifyResult.session.userId || targetEmail);
-    saveDatabase();
 
     if (verifiedUser) {
       logAudit("auth.email_verified", verifiedUser, "user", verifiedUser.id, { email: targetEmail, ip: req.ip });
@@ -2639,27 +2216,16 @@ api.get("/auth/verify-email", emailVerificationLimiter, async (req, res) => {
 
     const targetEmail = verifyResult.session.email || cleanEmail;
 
-    for (const u of db.users.values()) {
-      if (u.email && u.email.trim().toLowerCase() === targetEmail.toLowerCase()) {
-        u.email_verified = true;
-        u.updated_at = nowIso();
-        break;
+    try {
+      const p = await supabaseDb.getProfileByEmail(targetEmail);
+      if (p?.id) {
+        await supabaseDb.updateProfile(p.id, { email_verified: true });
       }
-    }
-
-    if (isSupabaseAdminConfigured()) {
-      try {
-        const p = await supabaseDb.getProfileByEmail(targetEmail);
-        if (p?.id) {
-          await supabaseDb.updateProfile(p.id, { email_verified: true });
-        }
-      } catch (sbErr: any) {
-        console.warn("[EasyX Auth] Supabase GET verify-email update notice:", sbErr.message);
-      }
+    } catch (sbErr: any) {
+      console.warn("[EasyX Auth] Supabase GET verify-email update notice:", sbErr.message);
     }
 
     await otpService.consumeOtp("SIGNUP", verifyResult.session.userId || targetEmail);
-    saveDatabase();
 
     return res.redirect(`/verify-email?verified=true&email=${encodeURIComponent(targetEmail)}`);
   } catch (err: any) {
@@ -2676,22 +2242,13 @@ api.post("/auth/forgot-password", forgotPasswordLimiter, async (req, res) => {
   }
   const cleanEmail = String(email).trim().toLowerCase();
 
-  // Find user in database or Supabase Auth
+  // Find user in Supabase
   let user: any = null;
-  for (const u of db.users.values()) {
-    if (u.email && u.email.trim().toLowerCase() === cleanEmail) {
-      user = u;
-      break;
-    }
-  }
-
-  if (!user && isSupabaseAdminConfigured()) {
-    try {
-      const p = await supabaseDb.getProfileByEmail(cleanEmail);
-      if (p) user = supabaseDb.formatProfile(p);
-    } catch (sbErr) {
-      console.error("[EasyX Auth] Supabase check error in forgot-password:", sbErr);
-    }
+  try {
+    const p = await supabaseDb.getProfileByEmail(cleanEmail);
+    if (p) user = supabaseDb.formatProfile(p);
+  } catch (sbErr) {
+    console.error("[EasyX Auth] Supabase check error in forgot-password:", sbErr);
   }
 
   // Security: If user not found, return generic success to prevent email enumeration
@@ -2771,20 +2328,11 @@ api.post("/auth/resend-reset-code", forgotPasswordLimiter, async (req, res) => {
   const cleanEmail = String(email).trim().toLowerCase();
 
   let user: any = null;
-  for (const u of db.users.values()) {
-    if (u.email && u.email.trim().toLowerCase() === cleanEmail) {
-      user = u;
-      break;
-    }
-  }
-
-  if (!user && isSupabaseAdminConfigured()) {
-    try {
-      const p = await supabaseDb.getProfileByEmail(cleanEmail);
-      if (p) user = supabaseDb.formatProfile(p);
-    } catch {
-      // ignore
-    }
+  try {
+    const p = await supabaseDb.getProfileByEmail(cleanEmail);
+    if (p) user = supabaseDb.formatProfile(p);
+  } catch {
+    // ignore
   }
 
   if (!user) {
@@ -2836,21 +2384,11 @@ api.post("/auth/reset-password", forgotPasswordLimiter, async (req, res) => {
 
   const cleanEmail = String(email).trim().toLowerCase();
   let user: any = null;
-  for (const u of db.users.values()) {
-    if (u.email && u.email.trim().toLowerCase() === cleanEmail) {
-      user = u;
-      break;
-    }
-  }
-
-  // Check Supabase if user not found in local memory DB
-  if (!user && isSupabaseAdminConfigured()) {
-    try {
-      const p = await supabaseDb.getProfileByEmail(cleanEmail);
-      if (p) user = supabaseDb.formatProfile(p);
-    } catch (sbErr) {
-      console.error("[EasyX Auth] Supabase check error in reset-password:", sbErr);
-    }
+  try {
+    const p = await supabaseDb.getProfileByEmail(cleanEmail);
+    if (p) user = supabaseDb.formatProfile(p);
+  } catch (sbErr) {
+    console.error("[EasyX Auth] Supabase check error in reset-password:", sbErr);
   }
 
   if (!user) {
@@ -2887,33 +2425,22 @@ api.post("/auth/reset-password", forgotPasswordLimiter, async (req, res) => {
     });
   }
 
-  user.password_hash = await bcrypt.hash(new_password, 10);
-  user.updated_at = nowIso();
-
-  // Consume OTP session in Supabase & memory
-  await otpService.consumeOtp("FORGOT_PASSWORD", cleanEmail);
-  saveDatabase();
-
-  // Synchronize new password to Supabase Auth if configured
-  if (isSupabaseAdminConfigured()) {
-    try {
-      const supabaseAdmin = getSupabaseAdmin();
-      if (supabaseAdmin) {
-        const { data: userList } = await supabaseAdmin.auth.admin.listUsers();
-        const sbAuthUser = (userList?.users as any[])?.find(
-          (u: any) => u.email?.toLowerCase() === cleanEmail
-        );
-        if (sbAuthUser) {
-          await supabaseAdmin.auth.admin.updateUserById(sbAuthUser.id, {
-            password: new_password,
-          });
-          console.log(`[EasyX Auth] Successfully synchronized password update to Supabase Auth for ${cleanEmail}`);
-        }
-      }
-    } catch (sbErr) {
-      console.error("[EasyX Auth] Error syncing password to Supabase Auth:", sbErr);
+  // Update password in Supabase Auth
+  try {
+    const supabaseAdmin = getSupabaseAdmin();
+    if (supabaseAdmin) {
+      await supabaseAdmin.auth.admin.updateUserById(user.id, {
+        password: new_password,
+      });
+      console.log(`[EasyX Auth] Successfully updated password in Supabase Auth for ${cleanEmail}`);
     }
+  } catch (sbErr: any) {
+    console.error("[EasyX Auth] Error updating password in Supabase Auth:", sbErr);
+    return res.status(500).json({ detail: "Failed to update password in authentication system." });
   }
+
+  // Consume OTP session in Supabase
+  await otpService.consumeOtp("FORGOT_PASSWORD", cleanEmail);
 
   // Send security alert confirmation email
   emailService.sendPasswordChangedAlert({
@@ -2931,7 +2458,7 @@ api.post("/auth/reset-password", forgotPasswordLimiter, async (req, res) => {
     `pwd_reset_success_${Date.now()}`
   );
 
-  console.log(`[EasyX Auth] Password successfully reset for user ${user.id} (${cleanEmail}) with email verification.`);
+  console.log(`[EasyX Auth] Password successfully reset in Supabase Auth for user ${user.id} (${cleanEmail}).`);
   res.json({
     ok: true,
     success: true,
@@ -2940,53 +2467,6 @@ api.post("/auth/reset-password", forgotPasswordLimiter, async (req, res) => {
 });
 
 // Dashboard & Plans
-const getPlansState = (userId: string) => {
-  const plans = Array.from(db.investment_plans.values()).sort((a, b) => a.display_order - b.display_order);
-  const userInvs = Array.from(db.investments.values()).filter((i) => i.user_id === userId && i.status !== "pending");
-
-  return plans.map((plan) => {
-    const invsForPlan = userInvs.filter((i) => i.plan_key === plan.key);
-    const activeInvs = invsForPlan.filter((i) => i.status === "active");
-    const unlocked = invsForPlan.length > 0;
-
-    const totalInvested = invsForPlan.reduce((acc, i) => acc + Number(i.principal || 0), 0);
-    const expectedProfit = activeInvs.reduce((acc, i) => acc + Number(i.profit_amount || 0), 0);
-    const expectedMaturity = activeInvs.reduce((acc, i) => acc + Number(i.maturity_amount || 0), 0);
-    const nextMaturity = activeInvs.length > 0
-      ? activeInvs.map((i) => i.maturity_at).filter(Boolean).sort()[0]
-      : null;
-
-    const price = Number(plan.price);
-    const profitAmount = (price * Number(plan.profit_percentage)) / 100;
-    const maturityAmount = (price * Number(plan.maturity_percentage)) / 100;
-
-    const sortedInvs = [...invsForPlan].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-    const sortedActive = sortedInvs.filter((i) => i.status === "active");
-    const latestInv = sortedActive[0] || sortedInvs[0] || null;
-
-    return {
-      key: plan.key,
-      name: plan.name,
-      display_order: plan.display_order,
-      price: fmt(price),
-      lock_days: Number(plan.lock_days),
-      profit_percentage: fmt(plan.profit_percentage),
-      maturity_percentage: fmt(plan.maturity_percentage),
-      profit_amount: fmt(profitAmount),
-      maturity_amount: fmt(maturityAmount),
-      unlocked,
-      cards: invsForPlan.length,
-      active_investments: activeInvs.length,
-      total_invested: fmt(totalInvested),
-      expected_profit: fmt(expectedProfit),
-      expected_maturity: fmt(expectedMaturity),
-      next_maturity: nextMaturity,
-      latest_investment: latestInv ? serializeInvestment(latestInv) : null,
-      investments: sortedInvs.map(serializeInvestment),
-    };
-  });
-};
-
 api.get("/dashboard", authMiddleware, async (req, res) => {
   const user = (req as any).user;
 
@@ -3613,48 +3093,47 @@ api.delete("/user/push-subscription", authMiddleware, (req, res) => {
 });
 
 // User Profile & Account Settings Management
-api.put("/user/profile", authMiddleware, (req, res) => {
+api.put("/user/profile", authMiddleware, async (req, res) => {
   const authUser = (req as any).user;
-  const user = db.users.get(authUser.id);
-  if (!user) {
-    return res.status(404).json({ detail: "User not found." });
-  }
-
-  const { name, phone, address, permanent_address } = req.body || {};
-  if (typeof name === "string" && name.trim()) {
-    if (user.kyc_status === "approved" && name.trim() !== user.name) {
-      return res.status(400).json({ detail: "Legal name cannot be modified after KYC verification is approved." });
+  try {
+    const profile = await supabaseDb.getProfileById(authUser.id);
+    if (!profile) {
+      return res.status(404).json({ detail: "User not found in authoritative database." });
     }
-    user.name = name.trim();
-  }
-  if (typeof phone === "string") {
-    user.phone = phone.trim();
-  }
-  if (typeof address === "string" || typeof permanent_address === "string") {
-    if (user.kyc_status === "approved" || user.kyc_status === "pending") {
-      return res.status(400).json({ detail: "Permanent address and ID data are locked and immutable once KYC verification is submitted or approved." });
-    }
-    const newAddr = (address || permanent_address || "").trim();
-    if (newAddr) {
-      user.address = newAddr;
-      user.permanent_address = newAddr;
-    }
-  }
 
-  saveDatabase();
+    const { name, phone, address, permanent_address } = req.body || {};
+    const updates: any = {};
 
-  const sanitized = { ...user };
-  delete sanitized.password_hash;
-  res.json({ user: sanitized, message: "Profile settings updated successfully." });
+    if (typeof name === "string" && name.trim()) {
+      if (profile.kyc_status === "approved" && name.trim() !== profile.name) {
+        return res.status(400).json({ detail: "Legal name cannot be modified after KYC verification is approved." });
+      }
+      updates.name = name.trim();
+    }
+    if (typeof phone === "string") {
+      updates.phone = phone.trim();
+    }
+    if (typeof address === "string" || typeof permanent_address === "string") {
+      if (profile.kyc_status === "approved" || profile.kyc_status === "pending") {
+        return res.status(400).json({ detail: "Permanent address and ID data are locked and immutable once KYC verification is submitted or approved." });
+      }
+      const newAddr = (address || permanent_address || "").trim();
+      if (newAddr) {
+        updates.address = newAddr;
+        updates.permanent_address = newAddr;
+      }
+    }
+
+    const updatedProfile = await supabaseDb.updateProfile(authUser.id, updates);
+    res.json({ user: updatedProfile, message: "Profile settings updated successfully." });
+  } catch (err: any) {
+    console.error("[EasyX Profile] Failed to update user profile in Supabase:", err.message);
+    res.status(500).json({ detail: "Failed to update profile: " + err.message });
+  }
 });
 
 api.post("/user/change-password", authMiddleware, async (req, res) => {
   const authUser = (req as any).user;
-  const user = db.users.get(authUser.id);
-  if (!user) {
-    return res.status(404).json({ detail: "User not found." });
-  }
-
   const { current_password, new_password, confirm_password } = req.body || {};
   if (!current_password || !new_password) {
     return res.status(422).json({ detail: "Current and new password are required." });
@@ -3665,96 +3144,65 @@ api.post("/user/change-password", authMiddleware, async (req, res) => {
   if (confirm_password && new_password !== confirm_password) {
     return res.status(422).json({ detail: "New password and confirmation password do not match." });
   }
-
-  // 1. Verify current password
-  let isValid = false;
-  if (user.password_hash) {
-    try {
-      isValid = await bcrypt.compare(current_password, user.password_hash);
-    } catch (e) {
-      isValid = false;
-    }
-  }
-  if (!isValid && user.password && user.password === current_password) {
-    isValid = true;
-  }
-  // Check default seed credentials ONLY if password has never been explicitly changed yet
-  if (!isValid && !user.password_updated_at) {
-    const adminPassword = process.env.ADMIN_PASSWORD || "Admin@Easyx2026";
-    const soleAdminEmail = getSoleAdminEmail();
-    const isSoleAdmin =
-      user.email?.toLowerCase().trim() === soleAdminEmail;
-    if (
-      isSoleAdmin &&
-      (current_password === adminPassword ||
-        current_password === "Admin@Easyx2026")
-    ) {
-      isValid = true;
-    } else if (
-      (user.email === "coloursfaction@gmail.com" || user.email === "dhukan.in@gmail.com") &&
-      (current_password === "User@Easyx2026" || current_password === "Password@123" || current_password === "Password123!" || current_password === "Uday123@#")
-    ) {
-      isValid = true;
-    }
-  }
-
-  if (!isValid) {
-    return res.status(400).json({ detail: "Incorrect current password. Please enter your existing password." });
-  }
-
   if (current_password === new_password) {
     return res.status(400).json({ detail: "New password must be different from your current password." });
   }
 
-  // 2. DELETE OLD PASSWORD & UPDATE NEW PASSWORD
-  // Delete legacy plaintext password property completely
-  delete user.password;
-
-  // Hash and persist new password
-  user.password_hash = await bcrypt.hash(new_password, 10);
-  user.password_updated_at = nowIso();
-  user.updated_at = nowIso();
+  // 1. Verify current password and update in Supabase Auth
+  try {
+    await supabaseDb.changePassword({
+      userId: authUser.id,
+      email: authUser.email,
+      currentPassword: current_password,
+      newPassword: new_password,
+    });
+  } catch (pwErr: any) {
+    if (pwErr.message === "INCORRECT_CURRENT_PASSWORD") {
+      return res.status(400).json({ detail: "Incorrect current password. Please enter your existing password." });
+    }
+    console.error("[EasyX Password] Supabase Auth change password error:", pwErr.message);
+    return res.status(500).json({ detail: pwErr.message || "Failed to update password in authentication system." });
+  }
 
   // Invalidate all pending password reset tokens for this user's email
-  const cleanEmail = user.email ? String(user.email).toLowerCase().trim() : "";
+  const cleanEmail = authUser.email ? String(authUser.email).toLowerCase().trim() : "";
   if (cleanEmail) {
     try {
       await otpService.consumeOtp("FORGOT_PASSWORD", cleanEmail);
-    } catch (consumeErr) {
+    } catch {
       // ignore
     }
   }
-
-  // Immediately flush changes to disk
-  saveDatabase(true);
 
   // Send security alert confirmation email if email service is active
   if (cleanEmail) {
     emailService
       .sendPasswordChangedAlert({
         to: cleanEmail,
-        name: user.name,
+        name: authUser.name,
         ip: req.ip,
       })
       .catch((err) => console.warn("[EasyX Email] Notice sending password changed alert:", err?.message || err));
   }
 
-  createNotification(
-    user.id,
-    "security_alert",
-    "Password Changed",
-    "Your EasyX account password was successfully updated. Your previous password has been permanently deleted and revoked.",
-    "/profile"
-  );
+  await supabaseDb.createNotification({
+    userId: authUser.id,
+    type: "system",
+    channel: "both",
+    title: "Password Changed",
+    body: "Your EasyX account password was successfully updated via Supabase Auth. Your previous password has been permanently deleted and revoked.",
+    actionUrl: "/profile",
+    actionText: "Review Account",
+  });
 
-  logAudit("auth.password_changed", user, user.role || "user", user.id, {
+  logAudit("auth.password_changed", authUser, authUser.role || "user", authUser.id, {
     email: cleanEmail,
     ip: req.ip,
   });
 
   res.json({
     ok: true,
-    message: "Password updated successfully. Your old password has been deleted and revoked.",
+    message: "Password updated successfully in Supabase Auth. Your old password has been deleted and revoked.",
   });
 });
 
@@ -3845,7 +3293,7 @@ api.post("/kyc/liveness/session/:id/cancel", authMiddleware, (req, res) => {
 });
 
 // 4. Server-Side Verification Endpoint
-api.post("/kyc/liveness/verify", authMiddleware, fileUploadLimiter, upload.single("selfie") as any, (req, res) => {
+api.post("/kyc/liveness/verify", authMiddleware, fileUploadLimiter, upload.single("selfie") as any, async (req, res) => {
   const user = (req as any).user;
   const { sessionId, simulatedOutcome, failureCategory, failureReason } = req.body;
 
@@ -3905,21 +3353,21 @@ api.post("/kyc/liveness/verify", authMiddleware, fileUploadLimiter, upload.singl
     session.confidence_score = session.is_test_mode ? "0.998" : "0.995";
     session.completed_at = ts;
 
-    // If a selfie frame was provided with the liveness session, store it securely for KYC admin inspection
+    // If a selfie frame was provided with the liveness session, store it securely in Supabase Storage for KYC admin inspection
     if (req.file) {
-      const docId = genId();
-      db.kyc_documents.set(docId, {
-        id: docId,
-        user_id: user.id,
-        kyc_record_id: null, // Linked on final KYC submission
-        liveness_session_id: session.id,
-        doc_type: "selfie",
-        mime: req.file.mimetype || "image/jpeg",
-        size: req.file.size,
-        data: req.file.buffer,
-        created_at: ts,
-      });
-      session.selfie_doc_id = docId;
+      if (isSupabaseAdminConfigured()) {
+        try {
+          const selfiePath = await supabaseDb.uploadKycDocument(
+            user.id,
+            req.file.buffer,
+            req.file.mimetype || "image/jpeg",
+            "selfie_liveness"
+          );
+          session.selfie_path = selfiePath;
+        } catch (err: any) {
+          console.warn("[KYC Liveness] Selfie upload to Supabase Storage failed:", err?.message);
+        }
+      }
     }
 
     return res.json({
@@ -3957,56 +3405,50 @@ api.post("/kyc/liveness/verify", authMiddleware, fileUploadLimiter, upload.singl
 // KYC
 api.get("/kyc", authMiddleware, async (req, res) => {
   const user = (req as any).user;
-  let rec = null;
   try {
-    rec = await supabaseDb.getUserKyc(user.id);
-  } catch (err) {
-    // fallback
-  }
-  if (!rec) {
-    rec = db.kyc_records.get(user.id);
-  }
+    const rec = await supabaseDb.getUserKyc(user.id);
 
-  if (!rec) {
-    return res.json({
-      status: "none",
-      id_type: null,
-      id_number: null,
-      id_number_masked: null,
-      id_number_present: false,
-      address: user.address || user.permanent_address || null,
-      permanent_address: user.permanent_address || user.address || null,
-      reject_reason: null,
-      can_submit: true,
-      is_immutable: false,
-      submitted_at: null,
-      reviewed_at: null,
-      documents: [],
-      liveness: null,
+    if (!rec) {
+      return res.json({
+        status: "none",
+        id_type: null,
+        id_number: null,
+        id_number_masked: null,
+        id_number_present: false,
+        address: user.address || user.permanent_address || null,
+        permanent_address: user.permanent_address || user.address || null,
+        reject_reason: null,
+        can_submit: true,
+        is_immutable: false,
+        submitted_at: null,
+        reviewed_at: null,
+        documents: [],
+        liveness: null,
+      });
+    }
+
+    const isSubmittedOrApproved = ["pending", "submitted", "approved"].includes(rec.status);
+
+    res.json({
+      status: rec.status,
+      id_type: rec.id_type,
+      id_number: rec.id_number || rec.id_number_masked || null,
+      id_number_masked: rec.id_number_masked || null,
+      id_number_present: Boolean(rec.id_number || rec.id_number_encrypted),
+      address: rec.address || rec.permanent_address || user.address || null,
+      permanent_address: rec.permanent_address || rec.address || user.permanent_address || user.address || null,
+      reject_reason: rec.status === "rejected" ? rec.reject_reason : null,
+      submitted_at: rec.submitted_at,
+      reviewed_at: rec.reviewed_at,
+      can_submit: ["none", "rejected"].includes(rec.status),
+      is_immutable: isSubmittedOrApproved,
+      documents: rec.documents || [],
+      liveness: rec.liveness_metadata || null,
     });
+  } catch (err: any) {
+    console.error("[EasyX KYC] KYC fetch error:", err?.message);
+    return res.status(503).json({ detail: "KYC data temporarily unavailable from authoritative database." });
   }
-  const docs = Array.from(db.kyc_documents.values())
-    .filter((d) => d.user_id === user.id)
-    .map((d) => ({ id: d.id, doc_type: d.doc_type, mime: d.mime, uploaded_at: d.created_at }));
-
-  const isSubmittedOrApproved = ["pending", "submitted", "approved"].includes(rec.status);
-
-  res.json({
-    status: rec.status,
-    id_type: rec.id_type,
-    id_number: rec.id_number || rec.id_number_masked || null,
-    id_number_masked: rec.id_number_masked || null,
-    id_number_present: Boolean(rec.id_number || rec.id_number_encrypted),
-    address: rec.address || rec.permanent_address || user.address || null,
-    permanent_address: rec.permanent_address || rec.address || user.permanent_address || user.address || null,
-    reject_reason: rec.status === "rejected" ? rec.reject_reason : null,
-    submitted_at: rec.submitted_at,
-    reviewed_at: rec.reviewed_at,
-    can_submit: ["none", "rejected"].includes(rec.status),
-    is_immutable: isSubmittedOrApproved,
-    documents: docs,
-    liveness: rec.liveness_metadata || null,
-  });
 });
 
 const kycUploadFields = upload.fields([
@@ -4059,24 +3501,23 @@ api.post(
     const { id_type, id_number, address, permanent_address, liveness_session_id } = req.body;
     const files = req.files as { [fieldname: string]: Express.Multer.File[] };
 
-    // 1. Validate User Eligibility / State & Immutability
-    if (user.kyc_status === "approved") {
-      const existingKyc = db.kyc_records.get(user.id);
+    // 1. Validate User Eligibility / State & Immutability via Supabase
+    try {
+      const existingKyc = await supabaseDb.getUserKyc(user.id);
       if (existingKyc && existingKyc.status === "approved") {
         return res.status(400).json({
           error: "validation_error",
           detail: "Your KYC identity verification is already approved. ID number, document type, and permanent address are locked and immutable.",
         });
       }
-      user.kyc_status = "none";
-    }
-
-    const existingKyc = db.kyc_records.get(user.id);
-    if (existingKyc && (existingKyc.status === "pending" || existingKyc.status === "submitted")) {
-      return res.status(400).json({
-        error: "validation_error",
-        detail: "Your KYC verification has already been submitted and is currently pending review. Submitted ID number and address data are locked and immutable while under review.",
-      });
+      if (existingKyc && (existingKyc.status === "pending" || existingKyc.status === "submitted")) {
+        return res.status(400).json({
+          error: "validation_error",
+          detail: "Your KYC verification has already been submitted and is currently pending review. Submitted ID number and address data are locked and immutable while under review.",
+        });
+      }
+    } catch (e: any) {
+      console.warn("[KYC] Eligibility check fallback:", e?.message);
     }
 
     // 2. Validate & Sanitize Document Type (Strict Whitelist)
@@ -4292,103 +3733,10 @@ api.post(
     const ts = nowIso();
     const recId = genId();
 
-    const record = {
-      id: recId,
-      user_id: user.id,
-      status: "pending",
-      id_type: normalizedIdType,
-      id_number: sanitizedIdNumber,
-      id_number_encrypted: "encrypted",
-      id_number_masked: maskedIdNumber || sanitizedIdNumber,
-      address: sanitizedAddress,
-      permanent_address: sanitizedAddress,
-      reject_reason: null,
-      admin_id: null,
-      liveness_metadata: livenessMeta,
-      submitted_at: ts,
-      reviewed_at: null,
-      created_at: ts,
-      updated_at: ts,
-    };
-    db.kyc_records.set(user.id, record);
-    user.kyc_status = "pending";
-    user.id_type = normalizedIdType;
-    user.id_number_masked = maskedIdNumber || sanitizedIdNumber;
-    if (sanitizedAddress) {
-      user.address = sanitizedAddress;
-      user.permanent_address = sanitizedAddress;
-    }
-
-    // Clean up any old KYC documents for this user before storing freshly uploaded documents
-    for (const [docKey, existingDoc] of Array.from(db.kyc_documents.entries())) {
-      if (existingDoc.user_id === user.id) {
-        db.kyc_documents.delete(docKey);
-      }
-    }
-
-    const createdDocs: any[] = [];
-
-    // Save ID front document
-    if (frontDoc) {
-      const docId1 = genId();
-      db.kyc_documents.set(docId1, {
-        id: docId1,
-        user_id: user.id,
-        kyc_record_id: recId,
-        doc_type: "id_front",
-        mime: frontDoc.mimetype,
-        size: frontDoc.size,
-        data: frontDoc.buffer,
-        created_at: ts,
-      });
-      createdDocs.push({ id: docId1, doc_type: "id_front", mime: frontDoc.mimetype, size: frontDoc.size, uploaded_at: ts });
-    }
-
-    // Save ID back document (for Aadhaar)
-    if (backDoc) {
-      const docIdBack = genId();
-      db.kyc_documents.set(docIdBack, {
-        id: docIdBack,
-        user_id: user.id,
-        kyc_record_id: recId,
-        doc_type: "id_back",
-        mime: backDoc.mimetype,
-        size: backDoc.size,
-        data: backDoc.buffer,
-        created_at: ts,
-      });
-      createdDocs.push({ id: docIdBack, doc_type: "id_back", mime: backDoc.mimetype, size: backDoc.size, uploaded_at: ts });
-    }
-
-    // Save or link Selfie doc
-    if (files?.selfie?.[0]) {
-      const selfieDoc = files.selfie[0];
-      const docId2 = genId();
-      db.kyc_documents.set(docId2, {
-        id: docId2,
-        user_id: user.id,
-        kyc_record_id: recId,
-        doc_type: "selfie",
-        mime: selfieDoc.mimetype,
-        size: selfieDoc.size,
-        data: selfieDoc.buffer,
-        created_at: ts,
-      });
-      createdDocs.push({ id: docId2, doc_type: "selfie", mime: selfieDoc.mimetype, size: selfieDoc.size, uploaded_at: ts });
-    } else if (livenessMeta && liveness_session_id) {
-      const lSession = db.liveness_sessions.get(liveness_session_id);
-      if (lSession?.selfie_doc_id) {
-        const existingDoc = db.kyc_documents.get(lSession.selfie_doc_id);
-        if (existingDoc) {
-          existingDoc.kyc_record_id = recId;
-          createdDocs.push({ id: existingDoc.id, doc_type: "selfie", mime: "image/jpeg", size: existingDoc.size || 0, uploaded_at: ts });
-        }
-      }
-    }
-
-    // Persist to Supabase Database & Storage
+    // Persist to authoritative Supabase Database & Storage
+    let kycRecord: any;
     try {
-      await supabaseDb.submitKyc({
+      kycRecord = await supabaseDb.submitKyc({
         userId: user.id,
         idType: normalizedIdType,
         idNumber: sanitizedIdNumber,
@@ -4400,8 +3748,20 @@ api.post(
         selfieBuffer: files?.selfie?.[0] ? files.selfie[0].buffer : undefined,
         selfieMime: files?.selfie?.[0] ? files.selfie[0].mimetype : undefined,
       });
+      if (!kycRecord) {
+        throw new Error("Supabase KYC submission returned empty record");
+      }
     } catch (err: any) {
       console.error("[KYC Supabase error]", err?.message);
+      return res.status(503).json({ detail: "Server temporarily unavailable. Please try again later." });
+    }
+
+    user.kyc_status = "pending";
+    user.id_type = normalizedIdType;
+    user.id_number_masked = maskedIdNumber || sanitizedIdNumber;
+    if (sanitizedAddress) {
+      user.address = sanitizedAddress;
+      user.permanent_address = sanitizedAddress;
     }
 
     createNotification(
@@ -4416,29 +3776,27 @@ api.post(
     notifyAdmins(
       "kyc_submitted",
       "New KYC Verification Submitted",
-      `User ${user.name} submitted identity documents (${record.id_type}) for manual KYC review.`,
-      { user_id: user.id, id_type: record.id_type, action_url: "/admin/kyc", action_text: "Review KYC" }
+      `User ${user.name} submitted identity documents (${normalizedIdType}) for manual KYC review.`,
+      { user_id: user.id, id_type: normalizedIdType, action_url: "/admin/kyc", action_text: "Review KYC" }
     );
 
     // Stop incomplete KYC reminder workflow
     reminderEngine.handleUserActionCompleted(user.id, "kyc");
 
-    saveDatabase();
-
     res.json({
       status: "pending",
-      id_type: record.id_type,
-      id_number: record.id_number || record.id_number_masked || null,
-      id_number_masked: record.id_number_masked || null,
-      id_number_present: Boolean(record.id_number || record.id_number_encrypted),
-      address: record.address || record.permanent_address || null,
-      permanent_address: record.permanent_address || record.address || null,
+      id_type: kycRecord.id_type,
+      id_number: kycRecord.id_number || kycRecord.id_number_masked || null,
+      id_number_masked: kycRecord.id_number_masked || null,
+      id_number_present: Boolean(kycRecord.id_number || kycRecord.id_number_encrypted),
+      address: kycRecord.address || kycRecord.permanent_address || null,
+      permanent_address: kycRecord.permanent_address || kycRecord.address || null,
       reject_reason: null,
-      liveness: record.liveness_metadata,
-      submitted_at: ts,
+      liveness: livenessMeta,
+      submitted_at: kycRecord.submitted_at || ts,
       reviewed_at: null,
       can_submit: false,
-      documents: createdDocs,
+      documents: kycRecord.documents || [],
     });
   }
 );
@@ -4552,56 +3910,38 @@ api.get("/kyc/documents/:id", authMiddleware, async (req, res) => {
   const user = (req as any).user;
   const docId = req.params.id;
 
-  // 1. Authoritative Supabase Storage retrieval
-  if (isSupabaseAdminConfigured()) {
-    try {
-      const stream = await supabaseDb.getKycDocumentStream(docId, user.role === "admin", user.id);
-      if (stream) {
-        res.setHeader("Content-Type", stream.contentType);
-        res.setHeader("Cache-Control", "private, no-cache, no-store, must-revalidate");
-        return res.send(stream.buffer);
-      }
-    } catch (err: any) {
-      if (err.message?.includes("Unauthorized")) {
-        return res.status(403).json({ detail: "Not authorized to access this document." });
-      }
+  try {
+    const stream = await supabaseDb.getKycDocumentStream(docId, user.role === "admin", user.id);
+    if (stream) {
+      res.setHeader("Content-Type", stream.contentType);
+      res.setHeader("Cache-Control", "private, no-cache, no-store, must-revalidate");
+      return res.send(stream.buffer);
     }
-  }
-
-  // Admin KYC document retrieval strictly depends ONLY on Supabase Storage
-  if (user.role === "admin") {
     return res.status(404).json({ detail: "KYC document not found in Supabase Storage." });
+  } catch (err: any) {
+    if (err.message?.includes("Unauthorized")) {
+      return res.status(403).json({ detail: "Not authorized to access this document." });
+    }
+    console.error("[KYC Document Stream] Authoritative retrieval error:", err?.message);
+    return res.status(503).json({ detail: "KYC document temporarily unavailable from authoritative storage." });
   }
-
-  // 2. Fallback for non-admin legacy documents (only if applicant owns it)
-  const doc = db.kyc_documents.get(docId);
-  if (!doc) return res.status(404).json({ detail: "Document not found" });
-  if (doc.user_id !== user.id) {
-    return res.status(403).json({ detail: "Not authorized" });
-  }
-  const { buffer, contentType } = getValidImageOrSvgDoc(doc);
-  res.setHeader("Content-Type", contentType);
-  res.send(buffer);
 });
 
 api.get("/admin/kyc/documents/:id", adminMiddleware, async (req, res) => {
   const docId = decodeURIComponent(req.params.id);
 
-  // Authoritative Supabase Storage retrieval - zero reliance on local memory or files
-  if (isSupabaseAdminConfigured()) {
-    try {
-      const stream = await supabaseDb.getKycDocumentStream(docId, true);
-      if (stream) {
-        res.setHeader("Content-Type", stream.contentType);
-        res.setHeader("Cache-Control", "private, no-cache, no-store, must-revalidate");
-        return res.send(stream.buffer);
-      }
-    } catch (err: any) {
-      console.error("[Admin KYC] Authoritative Supabase Storage download error:", err.message);
+  try {
+    const stream = await supabaseDb.getKycDocumentStream(docId, true);
+    if (stream) {
+      res.setHeader("Content-Type", stream.contentType);
+      res.setHeader("Cache-Control", "private, no-cache, no-store, must-revalidate");
+      return res.send(stream.buffer);
     }
+    return res.status(404).json({ detail: "KYC document not found in Supabase Storage." });
+  } catch (err: any) {
+    console.error("[Admin KYC] Authoritative Supabase Storage download error:", err?.message);
+    return res.status(503).json({ detail: "KYC document temporarily unavailable from authoritative storage." });
   }
-
-  return res.status(404).json({ detail: "KYC document not found in Supabase Storage." });
 });
 
 // ==================== ADMIN ROUTES ====================
@@ -4618,422 +3958,82 @@ api.get("/admin/overview", adminMiddleware, async (_req, res) => {
 });
 
 // Admin Growth Analytics & Trends for Recharts Dashboard
-api.get("/admin/analytics/trends", adminMiddleware, (req, res) => {
+api.get("/admin/analytics/trends", adminMiddleware, async (req, res) => {
   const period = String(req.query.period || "30d").toLowerCase(); // '7d', '30d', '90d', '1y', 'all'
-  const now = new Date();
-  
-  let daysCount = 30;
-  let isMonthly = false;
-  if (period === "7d") daysCount = 7;
-  else if (period === "30d") daysCount = 30;
-  else if (period === "90d") daysCount = 90;
-  else if (period === "1y") { daysCount = 365; isMonthly = true; }
-  else if (period === "all") { daysCount = 180; isMonthly = true; }
-
-  const nonAdminUsers = Array.from(db.users.values()).filter((u) => u.role !== "admin");
-  const allDeposits = Array.from(db.deposits.values());
-  const allInvestments = Array.from(db.investments.values());
-
-  // Generate bucket dates
-  interface BucketData {
-    date: string;
-    formatted_date: string;
-    full_date: string;
-    rawDate: Date;
-    new_users: number;
-    cumulative_users: number;
-    active_users: number;
-    kyc_verified: number;
-    approved_deposits: number;
-    pending_deposits: number;
-    rejected_deposits: number;
-    total_deposits: number;
-    cumulative_deposits: number;
-    deposit_count: number;
-    avg_deposit: number;
+  try {
+    const trends = await supabaseDb.getAdminTrends(period);
+    return res.json(trends);
+  } catch (err: any) {
+    console.error("[Admin Trends] Supabase fetch error:", err?.message);
+    return res.status(503).json({ detail: "Analytics trends temporarily unavailable from authoritative database." });
   }
-
-  const buckets: BucketData[] = [];
-  const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-
-  if (isMonthly) {
-    // 12 monthly buckets
-    for (let i = 11; i >= 0; i--) {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-      buckets.push({
-        date: key,
-        formatted_date: `${monthNames[d.getMonth()]} ${String(d.getFullYear()).slice(2)}`,
-        full_date: `${monthNames[d.getMonth()]} ${d.getFullYear()}`,
-        rawDate: d,
-        new_users: 0,
-        cumulative_users: 0,
-        active_users: 0,
-        kyc_verified: 0,
-        approved_deposits: 0,
-        pending_deposits: 0,
-        rejected_deposits: 0,
-        total_deposits: 0,
-        cumulative_deposits: 0,
-        deposit_count: 0,
-        avg_deposit: 0,
-      });
-    }
-  } else {
-    // Daily buckets
-    for (let i = daysCount - 1; i >= 0; i--) {
-      const d = new Date(now.getTime() - i * 86400000);
-      const key = d.toISOString().slice(0, 10);
-      const day = d.getDate();
-      const month = monthNames[d.getMonth()];
-      buckets.push({
-        date: key,
-        formatted_date: `${day} ${month}`,
-        full_date: `${day} ${month} ${d.getFullYear()}`,
-        rawDate: d,
-        new_users: 0,
-        cumulative_users: 0,
-        active_users: 0,
-        kyc_verified: 0,
-        approved_deposits: 0,
-        pending_deposits: 0,
-        rejected_deposits: 0,
-        total_deposits: 0,
-        cumulative_deposits: 0,
-        deposit_count: 0,
-        avg_deposit: 0,
-      });
-    }
-  }
-
-  // Populate new user registrations & KYC
-  for (const user of nonAdminUsers) {
-    if (!user.created_at) continue;
-    const uDate = new Date(user.created_at);
-    const dateKey = isMonthly 
-      ? `${uDate.getFullYear()}-${String(uDate.getMonth() + 1).padStart(2, "0")}`
-      : user.created_at.slice(0, 10);
-
-    const bucket = buckets.find((b) => b.date === dateKey);
-    if (bucket) {
-      bucket.new_users += 1;
-      if (user.kyc_status === "approved") bucket.kyc_verified += 1;
-      if (user.status === "active") bucket.active_users += 1;
-    }
-  }
-
-  // Populate deposits
-  for (const dep of allDeposits) {
-    if (!dep.created_at) continue;
-    const dDate = new Date(dep.created_at);
-    const dateKey = isMonthly 
-      ? `${dDate.getFullYear()}-${String(dDate.getMonth() + 1).padStart(2, "0")}`
-      : dep.created_at.slice(0, 10);
-
-    const bucket = buckets.find((b) => b.date === dateKey);
-    if (bucket) {
-      const amt = Number(dep.amount || 0);
-      const appAmt = Number(dep.approved_amount || dep.amount || 0);
-      bucket.total_deposits += amt;
-
-      if (dep.status === "approved") {
-        bucket.approved_deposits += appAmt;
-        bucket.deposit_count += 1;
-      } else if (dep.status === "pending") {
-        bucket.pending_deposits += amt;
-      } else if (dep.status === "rejected") {
-        bucket.rejected_deposits += amt;
-      }
-    }
-  }
-
-  // Calculate cumulative counts and running totals
-  let runningUsers = 0;
-  let runningDeposits = 0;
-
-  // First account for users registered before the first bucket
-  const firstBucketStart = buckets[0]?.rawDate || new Date(0);
-  const priorUsers = nonAdminUsers.filter((u) => u.created_at && new Date(u.created_at) < firstBucketStart).length;
-  const priorApprovedDeposits = allDeposits
-    .filter((d) => d.status === "approved" && d.created_at && new Date(d.created_at) < firstBucketStart)
-    .reduce((sum, d) => sum + Number(d.approved_amount || d.amount || 0), 0);
-
-  runningUsers = priorUsers;
-  runningDeposits = priorApprovedDeposits;
-
-  for (const b of buckets) {
-    runningUsers += b.new_users;
-    runningDeposits += b.approved_deposits;
-
-    b.cumulative_users = runningUsers;
-    b.cumulative_deposits = Math.round(runningDeposits * 100) / 100;
-    b.approved_deposits = Math.round(b.approved_deposits * 100) / 100;
-    b.pending_deposits = Math.round(b.pending_deposits * 100) / 100;
-    b.total_deposits = Math.round(b.total_deposits * 100) / 100;
-    b.avg_deposit = b.deposit_count > 0 ? Math.round((b.approved_deposits / b.deposit_count) * 100) / 100 : 0;
-  }
-
-  // Network breakdown
-  const networkMap: Record<string, { volume: number; count: number; color: string }> = {
-    TRC20: { volume: 0, count: 0, color: "#10b981" },
-    BEP20: { volume: 0, count: 0, color: "#a855f7" },
-    ERC20: { volume: 0, count: 0, color: "#0ea5e9" },
-    POLYGON: { volume: 0, count: 0, color: "#f59e0b" },
-  };
-
-  for (const dep of allDeposits) {
-    if (dep.status === "approved") {
-      const net = (dep.network || "TRC20").toUpperCase();
-      if (!networkMap[net]) {
-        networkMap[net] = { volume: 0, count: 0, color: "#ec4899" };
-      }
-      const v = Number(dep.approved_amount || dep.amount || 0);
-      networkMap[net].volume += v;
-      networkMap[net].count += 1;
-    }
-  }
-
-  const totalAppVolume = Object.values(networkMap).reduce((sum, n) => sum + n.volume, 0) || 1;
-  const network_breakdown = Object.entries(networkMap)
-    .filter(([_, data]) => data.count > 0 || data.volume > 0)
-    .map(([network, data]) => ({
-      network,
-      volume: Math.round(data.volume * 100) / 100,
-      count: data.count,
-      percentage: Math.round((data.volume / totalAppVolume) * 1000) / 10,
-      color: data.color,
-    }));
-
-  // Plan Breakdown
-  const planMap: Record<string, { name: string; volume: number; count: number; color: string }> = {
-    silver: { name: "Silver ($300)", volume: 0, count: 0, color: "#94a3b8" },
-    gold: { name: "Gold ($1,000)", volume: 0, count: 0, color: "#fbbf24" },
-    platinum: { name: "Platinum ($5,000)", volume: 0, count: 0, color: "#a855f7" },
-    diamond: { name: "Diamond ($10,000)", volume: 0, count: 0, color: "#38bdf8" },
-  };
-
-  for (const inv of allInvestments) {
-    const key = (inv.plan_key || "silver").toLowerCase();
-    if (planMap[key]) {
-      planMap[key].volume += Number(inv.principal || 0);
-      planMap[key].count += 1;
-    }
-  }
-  const totalPlanVolume = Object.values(planMap).reduce((sum, p) => sum + p.volume, 0) || 1;
-  const plan_breakdown = Object.entries(planMap).map(([key, data]) => ({
-    key,
-    name: data.name,
-    volume: Math.round(data.volume * 100) / 100,
-    count: data.count,
-    percentage: Math.round((data.volume / totalPlanVolume) * 1000) / 10,
-    color: data.color,
-  }));
-
-  // KYC Funnel
-  const kycApproved = nonAdminUsers.filter((u) => u.kyc_status === "approved").length;
-  const kycPending = nonAdminUsers.filter((u) => u.kyc_status === "pending").length;
-  const kycRejected = nonAdminUsers.filter((u) => u.kyc_status === "rejected").length;
-  const kycNone = nonAdminUsers.filter((u) => !u.kyc_status || u.kyc_status === "none").length;
-  const totalU = nonAdminUsers.length || 1;
-
-  const kyc_funnel = [
-    { status: "Approved", count: kycApproved, percentage: Math.round((kycApproved / totalU) * 100), color: "#10b981" },
-    { status: "Pending Review", count: kycPending, percentage: Math.round((kycPending / totalU) * 100), color: "#f59e0b" },
-    { status: "Not Submitted", count: kycNone, percentage: Math.round((kycNone / totalU) * 100), color: "#64748b" },
-    { status: "Rejected", count: kycRejected, percentage: Math.round((kycRejected / totalU) * 100), color: "#f43f5e" },
-  ];
-
-  // Summary Metrics
-  const periodNewUsers = buckets.reduce((sum, b) => sum + b.new_users, 0);
-  const periodApprovedDeposits = buckets.reduce((sum, b) => sum + b.approved_deposits, 0);
-  const periodPendingDeposits = buckets.reduce((sum, b) => sum + b.pending_deposits, 0);
-  const totalApprovedDepositsOverall = allDeposits
-    .filter((d) => d.status === "approved")
-    .reduce((sum, d) => sum + Number(d.approved_amount || d.amount || 0), 0);
-
-  const usersWithDeposits = new Set(allDeposits.filter((d) => d.status === "approved").map((d) => d.user_id)).size;
-  const depositConversionRate = nonAdminUsers.length > 0 ? Math.round((usersWithDeposits / nonAdminUsers.length) * 1000) / 10 : 0;
-
-  // Peak days
-  let peakDepositDay = { date: "—", amount: 0 };
-  let peakRegDay = { date: "—", count: 0 };
-  for (const b of buckets) {
-    if (b.approved_deposits > peakDepositDay.amount) {
-      peakDepositDay = { date: b.formatted_date, amount: b.approved_deposits };
-    }
-    if (b.new_users > peakRegDay.count) {
-      peakRegDay = { date: b.formatted_date, count: b.new_users };
-    }
-  }
-
-  // Calculate approximate growth rate (first half of period vs second half)
-  const half = Math.floor(buckets.length / 2);
-  const firstHalfUsers = buckets.slice(0, half).reduce((sum, b) => sum + b.new_users, 0) || 1;
-  const secondHalfUsers = buckets.slice(half).reduce((sum, b) => sum + b.new_users, 0);
-  const userGrowthRate = Math.round(((secondHalfUsers - firstHalfUsers) / firstHalfUsers) * 1000) / 10;
-
-  const firstHalfDeps = buckets.slice(0, half).reduce((sum, b) => sum + b.approved_deposits, 0) || 1;
-  const secondHalfDeps = buckets.slice(half).reduce((sum, b) => sum + b.approved_deposits, 0);
-  const depositGrowthRate = Math.round(((secondHalfDeps - firstHalfDeps) / firstHalfDeps) * 1000) / 10;
-
-  const totalDepCount = allDeposits.filter((d) => d.status === "approved").length;
-  const avgDepositAmount = totalDepCount > 0 ? Math.round((totalApprovedDepositsOverall / totalDepCount) * 100) / 100 : 0;
-
-  res.json({
-    period,
-    summary: {
-      total_users: nonAdminUsers.length,
-      period_new_users: periodNewUsers,
-      user_growth_rate: userGrowthRate,
-      total_approved_deposits: fmt(totalApprovedDepositsOverall),
-      period_approved_deposits: fmt(periodApprovedDeposits),
-      period_pending_deposits: fmt(periodPendingDeposits),
-      deposit_growth_rate: depositGrowthRate,
-      deposit_conversion_rate: depositConversionRate,
-      avg_deposit_amount: fmt(avgDepositAmount),
-      active_investors_count: nonAdminUsers.filter((u) => u.status === "active").length,
-      peak_deposit_day: { date: peakDepositDay.date, amount: fmt(peakDepositDay.amount) },
-      peak_registration_day: { date: peakRegDay.date, count: peakRegDay.count },
-    },
-    time_series: buckets,
-    network_breakdown,
-    plan_breakdown,
-    kyc_funnel,
-  });
 });
 
 // Admin Users
-api.get("/admin/users", adminMiddleware, (req, res) => {
+api.get("/admin/users", adminMiddleware, async (req, res) => {
   const { status, q } = req.query;
-  let list = Array.from(db.users.values()).filter((u) => u.role !== "admin");
-
-  if (status) list = list.filter((u) => u.status === status);
-  if (q) {
-    const rx = String(q).trim().toLowerCase();
-    list = list.filter(
-      (u) =>
-        (u.name && u.name.toLowerCase().includes(rx)) ||
-        (u.email && u.email.toLowerCase().includes(rx)) ||
-        (u.phone && u.phone.toLowerCase().includes(rx)) ||
-        (u.referral_code && u.referral_code.toLowerCase().includes(rx)) ||
-        (u.id && u.id.toLowerCase().includes(rx)) ||
-        (u.kyc_status && u.kyc_status.toLowerCase().includes(rx))
-    );
+  try {
+    const result = await supabaseDb.getAdminUsers({
+      status: typeof status === "string" ? status : undefined,
+      query: typeof q === "string" ? q : undefined,
+    });
+    return res.json(result);
+  } catch (err: any) {
+    console.error("[Admin Users] Supabase fetch error:", err?.message);
+    return res.status(503).json({ detail: "User data temporarily unavailable from authoritative database." });
   }
-
-  const result = list.map((u) => {
-    const userClean = cleanUser(u);
-    const wallet = getOrCreateWallet(u.id);
-    const invs = Array.from(db.investments.values()).filter((i) => i.user_id === u.id);
-    const activeInvs = invs.filter((i) => i.status === "active");
-    const activePrincipal = activeInvs.reduce((sum, i) => sum + Number(i.principal || 0), 0);
-    const directReferrals = db.referrals.filter((r) => r.referrer_id === u.id).length;
-    const commsEarned = Array.from(db.referral_commissions.values())
-      .filter((c) => c.referrer_id === u.id && c.status === "paid")
-      .reduce((sum, c) => sum + Number(c.amount || 0), 0);
-
-    return {
-      ...userClean,
-      kyc_status: u.kyc_status || "none",
-      wallet: {
-        currency: wallet.currency || "USDT",
-        available_balance: fmt(wallet.available_balance),
-        locked_investment: fmt(activePrincipal),
-        total_invested: fmt(wallet.total_invested),
-        total_earned: fmt(wallet.total_earned),
-      },
-      investments: {
-        total: invs.length,
-        active: activeInvs.length,
-        active_principal: fmt(activePrincipal),
-        matured: invs.filter((i) => i.status === "matured").length,
-      },
-      referrals: {
-        total_referred: directReferrals,
-        commission_earned: fmt(commsEarned),
-      },
-    };
-  });
-
-  res.json({ total: result.length, users: result });
 });
 
-api.get("/admin/users/:id", adminMiddleware, (req, res) => {
-  const u = db.users.get(req.params.id);
-  if (!u) return res.status(404).json({ detail: "User not found" });
-
-  const wallet = getOrCreateWallet(u.id);
-  const invs = Array.from(db.investments.values()).filter((i) => i.user_id === u.id);
-  const activeInvs = invs.filter((i) => i.status === "active");
-  const activePrincipal = activeInvs.reduce((sum, i) => sum + Number(i.principal || 0), 0);
-  const directReferrals = db.referrals.filter((r) => r.referrer_id === u.id).length;
-  const commsEarned = Array.from(db.referral_commissions.values())
-    .filter((c) => c.referrer_id === u.id && c.status === "paid")
-    .reduce((sum, c) => sum + Number(c.amount || 0), 0);
-
-  res.json({
-    ...cleanUser(u),
-    kyc_status: u.kyc_status || "none",
-    wallet: {
-      currency: wallet.currency || "USDT",
-      available_balance: fmt(wallet.available_balance),
-      locked_investment: fmt(activePrincipal),
-      total_invested: fmt(wallet.total_invested),
-      total_earned: fmt(wallet.total_earned),
-    },
-    investments: {
-      total: invs.length,
-      active: activeInvs.length,
-      active_principal: fmt(activePrincipal),
-      matured: invs.filter((i) => i.status === "matured").length,
-    },
-    referrals: {
-      total_referred: directReferrals,
-      commission_earned: fmt(commsEarned),
-    },
-  });
+api.get("/admin/users/:id", adminMiddleware, async (req, res) => {
+  try {
+    const userDetail = await supabaseDb.getAdminUserById(req.params.id);
+    if (!userDetail) return res.status(404).json({ detail: "User not found" });
+    return res.json(userDetail);
+  } catch (err: any) {
+    console.error("[Admin User Detail] Supabase fetch error:", err?.message);
+    return res.status(503).json({ detail: "User data temporarily unavailable from authoritative database." });
+  }
 });
 
-api.post("/admin/users/:id/suspend", adminMiddleware, (req, res) => {
+api.post("/admin/users/:id/suspend", adminMiddleware, async (req, res) => {
   const admin = (req as any).user;
-  const u = db.users.get(req.params.id);
-  if (!u) return res.status(404).json({ detail: "User not found" });
-  if (u.role === "admin") return res.status(400).json({ detail: "Admin accounts cannot be suspended." });
-
-  u.status = "suspended";
-  u.suspended_at = nowIso();
-  u.suspended_reason = req.body.reason || "Administrative suspension";
-  u.suspended_by = admin.id;
-
-  logAudit("user.suspend", admin, "user", u.id, { reason: u.suspended_reason });
-  createNotification(
-    u.id,
-    "account_suspended",
-    "Account suspended",
-    "Your account has been suspended. Existing investments continue toward maturity. Contact support for details."
-  );
-
-  res.json(cleanUser(u));
+  try {
+    const updated = await supabaseDb.suspendUser({
+      userId: req.params.id,
+      adminId: admin.id,
+      adminEmail: admin.email,
+      reason: req.body.reason,
+    });
+    return res.json(updated);
+  } catch (err: any) {
+    if (err?.message?.includes("cannot be suspended") || err?.message?.includes("not found")) {
+      return res.status(400).json({ detail: err.message });
+    }
+    console.error("[Admin Suspend] Supabase error:", err?.message);
+    return res.status(503).json({ detail: "Failed to suspend user in authoritative database." });
+  }
 });
 
-api.post("/admin/users/:id/unsuspend", adminMiddleware, (req, res) => {
+api.post("/admin/users/:id/unsuspend", adminMiddleware, async (req, res) => {
   const admin = (req as any).user;
-  const u = db.users.get(req.params.id);
-  if (!u) return res.status(404).json({ detail: "User not found" });
-
-  u.status = "active";
-  delete u.suspended_at;
-  delete u.suspended_reason;
-  delete u.suspended_by;
-
-  logAudit("user.unsuspend", admin, "user", u.id);
-  createNotification(u.id, "account_reactivated", "Account reactivated", "Your account has been reactivated. Welcome back!");
-
-  res.json(cleanUser(u));
+  try {
+    const updated = await supabaseDb.unsuspendUser({
+      userId: req.params.id,
+      adminId: admin.id,
+      adminEmail: admin.email,
+    });
+    return res.json(updated);
+  } catch (err: any) {
+    if (err?.message?.includes("not found")) {
+      return res.status(404).json({ detail: err.message });
+    }
+    console.error("[Admin Unsuspend] Supabase error:", err?.message);
+    return res.status(503).json({ detail: "Failed to unsuspend user in authoritative database." });
+  }
 });
 
 // Admin Users Batch Set Status (Bulk Activate/Unsuspend, Suspend, Verify KYC, Reject KYC)
-api.post("/admin/users/batch-set-status", adminMiddleware, (req, res) => {
+api.post("/admin/users/batch-set-status", adminMiddleware, async (req, res) => {
   const admin = (req as any).user;
   const ids: string[] = Array.isArray(req.body.ids) ? req.body.ids : [];
   const status = String(req.body.status || "").toLowerCase();
@@ -5044,64 +4044,19 @@ api.post("/admin/users/batch-set-status", adminMiddleware, (req, res) => {
     return res.status(422).json({ detail: "Invalid target user status." });
   }
 
-  const updated: any[] = [];
-  const errors: { id: string; error: string }[] = [];
-
-  for (const id of ids) {
-    const u = db.users.get(id);
-    if (!u) {
-      errors.push({ id, error: "User not found" });
-      continue;
-    }
-    if (u.role === "admin") {
-      errors.push({ id, error: "Cannot modify admin user" });
-      continue;
-    }
-
-    if (status === "suspended") {
-      u.status = "suspended";
-      u.suspended_at = nowIso();
-      u.suspended_reason = reason || "Batch suspended by administrator";
-      u.suspended_by = admin.id;
-      logAudit("user.batch_suspend", admin, "user", u.id, { reason: u.suspended_reason });
-      createNotification(u.id, "account_suspended", "Account suspended", `Your account has been suspended by an administrator.${reason ? ` Reason: ${reason}` : ""}`);
-    } else if (status === "active") {
-      u.status = "active";
-      delete u.suspended_at;
-      delete u.suspended_reason;
-      delete u.suspended_by;
-      logAudit("user.batch_unsuspend", admin, "user", u.id);
-      createNotification(u.id, "account_reactivated", "Account active", "Your account is active. Welcome back!");
-    } else if (status === "kyc_approved") {
-      u.kyc_status = "approved";
-      for (const k of db.kyc_records.values()) {
-        if (k.user_id === u.id) {
-          k.status = "approved";
-          k.admin_id = admin.id;
-          k.decided_at = nowIso();
-          k.updated_at = nowIso();
-        }
-      }
-      logAudit("user.batch_kyc_approved", admin, "user", u.id);
-      createNotification(u.id, "kyc_approved", "KYC Approved", "Your identity verification has been approved by admin.");
-    } else if (status === "kyc_rejected") {
-      u.kyc_status = "rejected";
-      for (const k of db.kyc_records.values()) {
-        if (k.user_id === u.id) {
-          k.status = "rejected";
-          k.reject_reason = reason || "Rejected by administrator";
-          k.admin_id = admin.id;
-          k.updated_at = nowIso();
-        }
-      }
-      logAudit("user.batch_kyc_rejected", admin, "user", u.id, { reason });
-      createNotification(u.id, "kyc_rejected", "KYC Rejected", `Your KYC verification was rejected.${reason ? ` Reason: ${reason}` : ""}`);
-    }
-
-    updated.push(cleanUser(u));
+  try {
+    const result = await supabaseDb.batchSetUserStatus({
+      ids,
+      status,
+      reason,
+      adminId: admin.id,
+      adminEmail: admin.email,
+    });
+    return res.json(result);
+  } catch (err: any) {
+    console.error("[Admin Batch Set Status] Supabase error:", err?.message);
+    return res.status(503).json({ detail: "Failed to batch update user status in authoritative database." });
   }
-
-  res.json({ success: true, count: updated.length, status, updated, errors });
 });
 
 // Admin Deposits
@@ -5109,27 +4064,16 @@ api.get("/admin/deposits", adminMiddleware, async (req, res) => {
   const { status } = req.query;
   try {
     const list = await supabaseDb.getAllDeposits(status as string);
-    res.json(list);
+    return res.json(list);
   } catch (err: any) {
-    let list = Array.from(db.deposits.values());
-    if (status) list = list.filter((d) => d.status === status);
-    const out = list
-      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-      .map((d) => {
-        const u = db.users.get(d.user_id);
-        return {
-          ...d,
-          user: { name: u?.name || null, email: u?.email || null },
-        };
-      });
-    res.json(out);
+    console.error("[Admin Deposits] Supabase fetch error:", err?.message);
+    return res.status(503).json({ detail: "Deposit data temporarily unavailable from authoritative database." });
   }
 });
 
 api.post("/admin/deposits/:id/approve", adminMiddleware, async (req, res) => {
   const admin = (req as any).user;
-  const dep = db.deposits.get(req.params.id);
-  const finalAmount = req.body.approved_amount ? fmt(req.body.approved_amount) : dep?.amount;
+  const finalAmount = req.body.approved_amount ? fmt(req.body.approved_amount) : undefined;
   const note = req.body.note ? sanitizePlainText(req.body.note, 500) : undefined;
 
   try {
@@ -5141,55 +4085,6 @@ api.post("/admin/deposits/:id/approve", adminMiddleware, async (req, res) => {
       adminNote: note,
     });
 
-    const targetUserId = updated.user_id || dep?.user_id;
-    const targetAmount = fmt(updated.approved_amount || finalAmount || dep?.amount);
-
-    if (dep) {
-      dep.status = "approved";
-      dep.approved_amount = targetAmount;
-      dep.admin_id = admin.id;
-      dep.admin_note = note || null;
-      dep.decided_at = nowIso();
-      dep.updated_at = nowIso();
-    }
-
-    // Mirror to local memory and dispatch real-time SSE notification
-    if (targetUserId) {
-      const w = getOrCreateWallet(targetUserId);
-      w.available_balance = fmt(Number(w.available_balance || 0) + Number(targetAmount));
-      w.total_deposited = fmt(Number(w.total_deposited || 0) + Number(targetAmount));
-      w.updated_at = nowIso();
-
-      const txId = genId();
-      db.wallet_transactions.set(txId, {
-        id: txId,
-        wallet_id: w.id,
-        user_id: targetUserId,
-        type: "DEPOSIT",
-        direction: "credit",
-        amount: targetAmount,
-        balance_after: w.available_balance,
-        ref_type: "payment_deposits",
-        ref_id: req.params.id,
-        status: "completed",
-        idempotency_key: `deposit-approve:${req.params.id}`,
-        note: `Deposit approved. Amount: $${targetAmount} USDT`,
-        created_at: nowIso(),
-        created_by: admin.id,
-      });
-
-      createNotification(
-        targetUserId,
-        "deposit",
-        "Deposit Approved! 💰",
-        `Your deposit of $${targetAmount} USDT has been verified and added to your available balance.`,
-        `deposit-approved:${req.params.id}`,
-        undefined,
-        { action_url: "/wallet", action_text: "View Wallet" }
-      );
-    }
-
-    saveDatabase(true);
     res.json(updated);
   } catch (err: any) {
     return res.status(400).json({ detail: err.message || "Failed to approve deposit." });
@@ -5198,7 +4093,6 @@ api.post("/admin/deposits/:id/approve", adminMiddleware, async (req, res) => {
 
 api.post("/admin/deposits/:id/reject", adminMiddleware, async (req, res) => {
   const admin = (req as any).user;
-  const dep = db.deposits.get(req.params.id);
   const note = req.body.note ? sanitizePlainText(req.body.note, 500) : undefined;
 
   try {
@@ -5209,29 +4103,6 @@ api.post("/admin/deposits/:id/reject", adminMiddleware, async (req, res) => {
       adminNote: note,
     });
 
-    const targetUserId = updated.user_id || dep?.user_id;
-
-    if (dep) {
-      dep.status = "rejected";
-      dep.admin_id = admin.id;
-      dep.admin_note = note || null;
-      dep.decided_at = nowIso();
-      dep.updated_at = nowIso();
-    }
-
-    if (targetUserId) {
-      createNotification(
-        targetUserId,
-        "deposit",
-        "Deposit Rejected",
-        `Your deposit request was rejected. Reason: ${note || "Proof could not be verified."}`,
-        `deposit-rejected:${req.params.id}`,
-        undefined,
-        { action_url: "/wallet", action_text: "View Wallet" }
-      );
-    }
-
-    saveDatabase(true);
     res.json(updated);
   } catch (err: any) {
     return res.status(400).json({ detail: err.message || "Failed to reject deposit." });
@@ -5256,43 +4127,12 @@ api.post("/admin/deposits/batch-approve", adminMiddleware, async (req, res) => {
         adminNote: cleanNote,
       });
 
-      const dep = db.deposits.get(id);
-      const targetUserId = updated.user_id || dep?.user_id;
-      const targetAmount = fmt(updated.approved_amount || dep?.amount || updated.amount);
-
-      if (dep) {
-        dep.status = "approved";
-        dep.approved_amount = targetAmount;
-        dep.admin_id = admin.id;
-        dep.admin_note = cleanNote;
-        dep.decided_at = nowIso();
-        dep.updated_at = nowIso();
-      }
-
-      if (targetUserId) {
-        const w = getOrCreateWallet(targetUserId);
-        w.available_balance = fmt(Number(w.available_balance || 0) + Number(targetAmount));
-        w.total_deposited = fmt(Number(w.total_deposited || 0) + Number(targetAmount));
-        w.updated_at = nowIso();
-
-        createNotification(
-          targetUserId,
-          "deposit",
-          "Deposit Approved! 💰",
-          `Your deposit of $${targetAmount} USDT has been verified and added to your available balance.`,
-          `deposit-approved:${id}`,
-          undefined,
-          { action_url: "/wallet", action_text: "View Wallet" }
-        );
-      }
-
       approved.push(updated);
     } catch (err: any) {
       errors.push({ id, error: err.message || "Failed to approve deposit." });
     }
   }
 
-  saveDatabase(true);
   res.json({ success: true, count: approved.length, approved, errors });
 });
 
@@ -5314,40 +4154,16 @@ api.post("/admin/deposits/batch-reject", adminMiddleware, async (req, res) => {
         adminNote: reason,
       });
 
-      const dep = db.deposits.get(id);
-      const targetUserId = updated.user_id || dep?.user_id;
-
-      if (dep) {
-        dep.status = "rejected";
-        dep.admin_id = admin.id;
-        dep.admin_note = reason;
-        dep.decided_at = nowIso();
-        dep.updated_at = nowIso();
-      }
-
-      if (targetUserId) {
-        createNotification(
-          targetUserId,
-          "deposit",
-          "Deposit Rejected",
-          `Your deposit was rejected. Reason: ${reason}`,
-          `deposit-rejected:${id}`,
-          undefined,
-          { action_url: "/wallet", action_text: "View Wallet" }
-        );
-      }
-
       rejected.push(updated);
     } catch (err: any) {
       errors.push({ id, error: err.message || "Failed to reject deposit." });
     }
   }
 
-  saveDatabase(true);
   res.json({ success: true, count: rejected.length, rejected, errors });
 });
 
-// Admin Deposits Batch Set Status (Approve, Reject, or Reset Pending)
+// Admin Deposits Batch Set Status (Approve or Reject)
 api.post("/admin/deposits/batch-set-status", adminMiddleware, async (req, res) => {
   const admin = (req as any).user;
   const ids: string[] = Array.isArray(req.body.ids) ? req.body.ids : [];
@@ -5355,85 +4171,28 @@ api.post("/admin/deposits/batch-set-status", adminMiddleware, async (req, res) =
   const note = String(req.body.note || req.body.reason || "").trim();
 
   if (!ids.length) return res.status(422).json({ detail: "No deposit IDs provided." });
-  if (!["approved", "rejected", "pending"].includes(status)) {
-    return res.status(422).json({ detail: "Invalid target status. Must be 'approved', 'rejected', or 'pending'." });
+  if (!["approved", "rejected"].includes(status)) {
+    return res.status(422).json({ detail: "Invalid target status. Must be 'approved' or 'rejected'." });
   }
 
   const updated: any[] = [];
   const errors: { id: string; error: string }[] = [];
 
   for (const id of ids) {
-    if (status === "approved" || status === "rejected") {
-      try {
-        const result = await supabaseDb.adminDecideDeposit({
-          depositId: id,
-          adminId: admin.id,
-          decision: status === "approved" ? "approve" : "reject",
-          adminNote: note || (status === "approved" ? "Batch approved via bulk action" : "Batch rejected via bulk action"),
-        });
+    try {
+      const result = await supabaseDb.adminDecideDeposit({
+        depositId: id,
+        adminId: admin.id,
+        decision: status === "approved" ? "approve" : "reject",
+        adminNote: note || (status === "approved" ? "Batch approved via bulk action" : "Batch rejected via bulk action"),
+      });
 
-        const dep = db.deposits.get(id);
-        const targetUserId = result.user_id || dep?.user_id;
-        const targetAmount = fmt(result.approved_amount || dep?.amount || result.amount);
-
-        if (dep) {
-          dep.status = status;
-          if (status === "approved") dep.approved_amount = targetAmount;
-          dep.admin_id = admin.id;
-          dep.admin_note = note;
-          dep.decided_at = nowIso();
-          dep.updated_at = nowIso();
-        }
-
-        if (targetUserId) {
-          if (status === "approved") {
-            const w = getOrCreateWallet(targetUserId);
-            w.available_balance = fmt(Number(w.available_balance || 0) + Number(targetAmount));
-            w.total_deposited = fmt(Number(w.total_deposited || 0) + Number(targetAmount));
-            w.updated_at = nowIso();
-
-            createNotification(
-              targetUserId,
-              "deposit",
-              "Deposit Approved! 💰",
-              `Your deposit of $${targetAmount} USDT has been verified and added to your available balance.`,
-              `deposit-approved:${id}`,
-              undefined,
-              { action_url: "/wallet", action_text: "View Wallet" }
-            );
-          } else {
-            createNotification(
-              targetUserId,
-              "deposit",
-              "Deposit Rejected",
-              `Your deposit was rejected. Reason: ${note || "Rejected by administrator"}`,
-              `deposit-rejected:${id}`,
-              undefined,
-              { action_url: "/wallet", action_text: "View Wallet" }
-            );
-          }
-        }
-
-        updated.push(result);
-      } catch (err: any) {
-        errors.push({ id, error: err.message || `Failed to set status to ${status}.` });
-      }
-    } else if (status === "pending") {
-      const dep = db.deposits.get(id);
-      if (dep) {
-        dep.status = "pending";
-        dep.approved_amount = null;
-        dep.admin_id = null;
-        dep.admin_note = note || "Reset to pending by admin";
-        dep.decided_at = null;
-        dep.updated_at = nowIso();
-        logAudit("deposit.batch_pending", admin, "deposit", dep.id, { note });
-        updated.push(dep);
-      }
+      updated.push(result);
+    } catch (err: any) {
+      errors.push({ id, error: err.message || `Failed to set status to ${status}.` });
     }
   }
 
-  saveDatabase(true);
   res.json({ success: true, count: updated.length, status, updated, errors });
 });
 
@@ -5806,33 +4565,15 @@ api.get("/admin/withdrawals", adminMiddleware, async (req, res) => {
   const { status } = req.query;
   try {
     const list = await supabaseDb.getAllWithdrawals(status as string);
-    res.json(list);
+    return res.json(list);
   } catch (err: any) {
-    let list = Array.from(db.withdrawals.values());
-    if (status) list = list.filter((w) => w.status === status);
-    const out = list
-      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-      .map((w) => {
-        const u = db.users.get(w.user_id);
-        return {
-          ...w,
-          user: {
-            id: u?.id || w.user_id,
-            name: u?.name || null,
-            email: u?.email || null,
-            phone: u?.phone || null,
-            kyc_status: u?.kyc_status || "none",
-            otp_verified: true,
-          },
-        };
-      });
-    res.json(out);
+    console.error("[Admin Withdrawals] Supabase fetch error:", err?.message);
+    return res.status(503).json({ detail: "Withdrawal data temporarily unavailable from authoritative database." });
   }
 });
 
 api.post("/admin/withdrawals/:id/approve", adminMiddleware, async (req, res) => {
   const admin = (req as any).user;
-  const w = db.withdrawals.get(req.params.id);
   const note = req.body.reason ? String(req.body.reason).trim() : undefined;
 
   try {
@@ -5843,14 +4584,6 @@ api.post("/admin/withdrawals/:id/approve", adminMiddleware, async (req, res) => 
       adminNote: note,
     });
 
-    if (w) {
-      w.status = "approved";
-      w.admin_id = admin.id;
-      w.admin_note = note || null;
-      w.decided_at = nowIso();
-      w.updated_at = nowIso();
-    }
-
     res.json(updated);
   } catch (err: any) {
     return res.status(400).json({ detail: err.message || "Failed to approve withdrawal." });
@@ -5859,7 +4592,6 @@ api.post("/admin/withdrawals/:id/approve", adminMiddleware, async (req, res) => 
 
 api.post("/admin/withdrawals/:id/reject", adminMiddleware, async (req, res) => {
   const admin = (req as any).user;
-  const w = db.withdrawals.get(req.params.id);
   const note = req.body.reason ? String(req.body.reason).trim() : undefined;
 
   try {
@@ -5870,48 +4602,29 @@ api.post("/admin/withdrawals/:id/reject", adminMiddleware, async (req, res) => {
       adminNote: note,
     });
 
-    if (w) {
-      w.status = "rejected";
-      w.admin_id = admin.id;
-      w.admin_note = note || null;
-      w.decided_at = nowIso();
-      w.updated_at = nowIso();
-    }
-
     res.json(updated);
   } catch (err: any) {
     return res.status(400).json({ detail: err.message || "Failed to reject withdrawal." });
   }
 });
 
-api.post("/admin/withdrawals/:id/processing", adminMiddleware, (req, res) => {
+api.post("/admin/withdrawals/:id/processing", adminMiddleware, async (req, res) => {
   const admin = (req as any).user;
-  const w = db.withdrawals.get(req.params.id);
-  if (!w) return res.status(404).json({ detail: "Withdrawal not found" });
-  if (w.status !== "approved") {
-    return res.status(409).json({ detail: `Only approved withdrawals can be set to processing. Current status: ${w.status}` });
+  try {
+    const updated = await supabaseDb.adminProcessWithdrawal({
+      withdrawalId: req.params.id,
+      adminId: admin.id,
+      action: "processing",
+    });
+
+    res.json(updated);
+  } catch (err: any) {
+    return res.status(400).json({ detail: err.message || "Failed to set withdrawal to processing." });
   }
-
-  w.status = "processing";
-  w.admin_id = admin.id;
-  w.updated_at = nowIso();
-
-  logAudit("withdrawal.processing", admin, "withdrawal", w.id);
-  createNotification(
-    w.user_id,
-    "withdrawal_processing",
-    "Withdrawal processing",
-    `Your ${w.network} withdrawal of ${w.amount} USDT is now processing on the blockchain.`,
-    `withdrawal-processing:${w.id}`
-  );
-
-  saveDatabase(true);
-  res.json(w);
 });
 
 api.post("/admin/withdrawals/:id/process", adminMiddleware, async (req, res) => {
   const admin = (req as any).user;
-  const w = db.withdrawals.get(req.params.id);
   const txh = String(req.body.tx_hash || "").trim();
   if (txh.length < 8) return res.status(422).json({ detail: "Enter a valid blockchain transaction hash." });
 
@@ -5922,14 +4635,6 @@ api.post("/admin/withdrawals/:id/process", adminMiddleware, async (req, res) => 
       action: "complete",
       txHash: txh,
     });
-
-    if (w) {
-      w.status = "completed";
-      w.tx_hash = txh;
-      w.admin_id = admin.id;
-      w.paid_at = nowIso();
-      w.updated_at = nowIso();
-    }
 
     res.json(updated);
   } catch (err: any) {
@@ -5954,21 +4659,28 @@ api.post("/admin/withdrawals/batch-set-status", adminMiddleware, async (req, res
   const errors: { id: string; error: string }[] = [];
 
   for (const id of ids) {
-    const w = db.withdrawals.get(id);
     const actualHash = tx_hash || ("0x" + Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join(""));
 
-    // 1. Authoritative update in Supabase
     try {
+      let result: any;
       if (status === "approved") {
-        await supabaseDb.adminProcessWithdrawal({
+        result = await supabaseDb.adminProcessWithdrawal({
           withdrawalId: id,
           action: "approve",
           adminId: admin.id,
           adminEmail: admin.email,
           adminNote: note || undefined,
         });
+      } else if (status === "processing") {
+        result = await supabaseDb.adminProcessWithdrawal({
+          withdrawalId: id,
+          action: "processing",
+          adminId: admin.id,
+          adminEmail: admin.email,
+          adminNote: note || undefined,
+        });
       } else if (status === "completed") {
-        await supabaseDb.adminProcessWithdrawal({
+        result = await supabaseDb.adminProcessWithdrawal({
           withdrawalId: id,
           action: "complete",
           adminId: admin.id,
@@ -5977,7 +4689,7 @@ api.post("/admin/withdrawals/batch-set-status", adminMiddleware, async (req, res
           adminNote: note || undefined,
         });
       } else if (status === "rejected") {
-        await supabaseDb.adminProcessWithdrawal({
+        result = await supabaseDb.adminProcessWithdrawal({
           withdrawalId: id,
           action: "reject",
           adminId: admin.id,
@@ -5985,203 +4697,75 @@ api.post("/admin/withdrawals/batch-set-status", adminMiddleware, async (req, res
           reason: note || "Batch rejected by admin",
         });
       }
-    } catch (sbErr: any) {
-      console.warn(`[BatchWithdrawal] Supabase process note for ${id}:`, sbErr?.message);
-    }
-
-    // 2. Mirror in local memory
-    if (w) {
-      if (w.status === "completed" || w.status === "paid") {
-        errors.push({ id, error: "Cannot modify an already completed withdrawal" });
-        continue;
-      }
-
-      if (status === "approved") {
-        w.status = "approved";
-        w.admin_id = admin.id;
-        w.admin_note = note || null;
-        w.decided_at = nowIso();
-        w.updated_at = nowIso();
-        logAudit("withdrawal.batch_approve", admin, "withdrawal", w.id);
-        createNotification(
-          w.user_id,
-          "withdrawal_approved",
-          "Withdrawal approved",
-          `Your ${w.network} withdrawal of ${w.amount} USDT was approved and is ready for dispatch.`,
-          `withdrawal-approved:${w.id}`
-        );
-      } else if (status === "processing") {
-        w.status = "processing";
-        w.admin_id = admin.id;
-        w.admin_note = note || null;
-        w.updated_at = nowIso();
-        logAudit("withdrawal.batch_processing", admin, "withdrawal", w.id);
-        createNotification(
-          w.user_id,
-          "withdrawal_processing",
-          "Withdrawal processing",
-          `Your ${w.network} withdrawal of ${w.amount} USDT is now processing on the blockchain.`,
-          `withdrawal-processing:${w.id}`
-        );
-      } else if (status === "completed") {
-        w.status = "completed";
-        w.tx_hash = actualHash;
-        w.admin_id = admin.id;
-        w.paid_at = nowIso();
-        w.updated_at = nowIso();
-        logAudit("withdrawal.batch_process", admin, "withdrawal", w.id, { tx_hash: actualHash });
-        createNotification(
-          w.user_id,
-          "withdrawal_paid",
-          "Withdrawal completed",
-          `Your ${w.network} withdrawal of ${w.amount} USDT has been dispatched. TX: ${actualHash}`,
-          `withdrawal-paid:${w.id}`
-        );
-      } else if (status === "rejected") {
-        if (w.status === "rejected") {
-          errors.push({ id, error: "Withdrawal is already rejected" });
-          continue;
-        }
-        w.status = "rejected";
-        w.admin_id = admin.id;
-        w.admin_note = note || "Batch rejected by admin";
-        w.decided_at = nowIso();
-        w.updated_at = nowIso();
-
-        await creditWallet(
-          w.user_id,
-          w.amount,
-          "WITHDRAWAL_REVERSAL",
-          "withdrawal",
-          w.id,
-          `withdraw-reverse:${w.id}`,
-          `${w.network} withdrawal rejected — amount returned`
-        );
-
-        logAudit("withdrawal.batch_reject", admin, "withdrawal", w.id, { reason: w.admin_note });
-        createNotification(
-          w.user_id,
-          "withdrawal_rejected",
-          "Withdrawal rejected",
-          `Your ${w.network} withdrawal of ${w.amount} USDT was rejected and returned to your wallet.${w.admin_note ? ` Reason: ${w.admin_note}` : ""}`,
-          `withdrawal-rejected:${w.id}`
-        );
-      }
-      updated.push(w);
-    } else {
-      updated.push({ id, status });
+      updated.push(result || { id, status });
+    } catch (err: any) {
+      errors.push({ id, error: err.message || `Failed to update withdrawal ${id}` });
     }
   }
 
-  saveDatabase(true);
   res.json({ success: true, count: updated.length, status, updated, errors });
 });
 
 // Admin Investments
-api.get("/admin/investments", adminMiddleware, (req, res) => {
+api.get("/admin/investments", adminMiddleware, async (req, res) => {
   const { status, q } = req.query;
-  let list = Array.from(db.investments.values());
-  if (status) list = list.filter((i) => i.status === status);
-
-  if (q) {
-    const rx = String(q).trim().toLowerCase();
-    const matchingUserIds = Array.from(db.users.values())
-      .filter((u) => (u.name && u.name.toLowerCase().includes(rx)) || (u.email && u.email.toLowerCase().includes(rx)))
-      .map((u) => u.id);
-    list = list.filter((i) => matchingUserIds.includes(i.user_id));
-  }
-
-  const out = list
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-    .map((i) => {
-      const u = db.users.get(i.user_id);
-      return {
-        ...serializeInvestment(i),
-        user_id: i.user_id,
-        user: { name: u?.name || null, email: u?.email || null },
-        refund_amount: i.refund_amount ? fmt(i.refund_amount) : null,
-        cancel_reason: i.cancel_reason || null,
-        cancelled_at: i.cancelled_at || null,
-      };
+  try {
+    const list = await supabaseDb.getAllInvestments({
+      status: typeof status === "string" ? status : undefined,
+      query: typeof q === "string" ? q : undefined,
     });
-
-  res.json(out);
+    return res.json(list);
+  } catch (err: any) {
+    console.error("[Admin Investments] Supabase fetch error:", err?.message);
+    return res.status(503).json({ detail: "Investment data temporarily unavailable from authoritative database." });
+  }
 });
 
 api.post("/admin/investments/:id/cancel", adminMiddleware, async (req, res) => {
   const admin = (req as any).user;
-  const inv = db.investments.get(req.params.id);
-  if (!inv) return res.status(404).json({ detail: "Investment not found" });
-  if (inv.status !== "active") return res.status(409).json({ detail: `Only active investments can be cancelled.` });
-
   const refundAmt = Number(req.body.refund_amount);
-  const principal = Number(inv.principal);
-  if (isNaN(refundAmt) || refundAmt < 0 || refundAmt > principal) {
-    return res.status(422).json({ detail: `Refund must be between 0 and ${principal} USDT.` });
+  const reason = req.body.reason ? String(req.body.reason).trim() : undefined;
+
+  try {
+    const updated = await supabaseDb.cancelInvestment({
+      investmentId: req.params.id,
+      adminId: admin.id,
+      adminEmail: admin.email,
+      refundAmount: isNaN(refundAmt) ? 0 : refundAmt,
+      reason,
+    });
+
+    res.json(updated);
+  } catch (err: any) {
+    return res.status(400).json({ detail: err.message || "Failed to cancel investment." });
   }
-
-  inv.status = "cancelled";
-  inv.cancelled_at = nowIso();
-  inv.cancel_reason = req.body.reason;
-  inv.refund_amount = fmt(refundAmt);
-  inv.cancelled_by = admin.id;
-  inv.updated_at = nowIso();
-
-  if (refundAmt > 0) {
-    await creditWallet(
-      inv.user_id,
-      fmt(refundAmt),
-      "REFUND",
-      "investment",
-      inv.id,
-      `invest-cancel-refund:${inv.id}`,
-      `Investment cancelled — ${fmt(refundAmt)} USDT refunded`
-    );
-  }
-
-  logAudit("investment.cancel", admin, "investment", inv.id, { refund_amount: inv.refund_amount, reason: inv.cancel_reason });
-  createNotification(
-    inv.user_id,
-    "investment_cancelled",
-    "Investment cancelled",
-    `Your ${inv.plan_name} investment was cancelled by an administrator. ${fmt(refundAmt)} USDT was refunded to your wallet. Reason: ${inv.cancel_reason}`,
-    `invest-cancelled:${inv.id}`
-  );
-
-  res.json(serializeInvestment(inv));
 });
 
 api.post("/admin/investments/:id/mature", adminMiddleware, async (req, res) => {
   const invId = req.params.id;
-  if (isSupabaseAdminConfigured()) {
-    try {
-      const performed = await supabaseDb.matureInvestment(invId);
-      if (!performed) {
-        return res.status(400).json({ detail: "Investment not found or already matured." });
-      }
-      return res.json({ performed_payout: true, investment: performed });
-    } catch (err: any) {
-      return res.status(500).json({ detail: err.message || "Failed to mature investment." });
+  try {
+    const performed = await supabaseDb.matureInvestment(invId);
+    if (!performed) {
+      return res.status(400).json({ detail: "Investment not found or already matured." });
     }
+    return res.json({ performed_payout: true, investment: performed });
+  } catch (err: any) {
+    return res.status(500).json({ detail: err.message || "Failed to mature investment." });
   }
-
-  const inv = db.investments.get(invId);
-  if (!inv) return res.status(404).json({ detail: "Investment not found" });
-
-  const performed = await matureInvestment(inv);
-  res.json({ performed_payout: performed, investment: serializeInvestment(inv) });
 });
 
-api.post("/admin/investments/:id/backdate", adminMiddleware, (req, res) => {
-  const inv = db.investments.get(req.params.id);
-  if (!inv) return res.status(404).json({ detail: "Investment not found" });
-
+api.post("/admin/investments/:id/backdate", adminMiddleware, async (req, res) => {
   const secondsAgo = Number(req.body.seconds_ago || 1);
-  const newMaturity = new Date(Date.now() - secondsAgo * 1000).toISOString();
-  inv.maturity_at = newMaturity;
-  inv.updated_at = nowIso();
-
-  res.json({ ok: true, maturity_at: newMaturity });
+  try {
+    const updated = await supabaseDb.backdateInvestment(req.params.id, secondsAgo);
+    return res.json({ ok: true, maturity_at: updated.maturity_at });
+  } catch (err: any) {
+    if (err?.message?.includes("not found")) {
+      return res.status(404).json({ detail: "Investment not found" });
+    }
+    console.error("[Admin Backdate] Supabase error:", err?.message);
+    return res.status(503).json({ detail: "Failed to backdate investment in authoritative database." });
+  }
 });
 
 api.post("/admin/maturity/run", adminMiddleware, async (_req, res) => {
@@ -6221,10 +4805,10 @@ api.get("/worker/maturity/status", requireSchedulerAuth, async (_req, res) => {
 });
 
 // Admin Plans
-api.get("/admin/plans", adminMiddleware, (_req, res) => {
-  const list = Array.from(db.investment_plans.values())
-    .sort((a, b) => a.display_order - b.display_order)
-    .map((p) => ({
+api.get("/admin/plans", adminMiddleware, async (_req, res) => {
+  try {
+    const plans = await supabaseDb.getInvestmentPlans();
+    const list = plans.map((p) => ({
       id: p.id,
       key: p.key,
       name: p.name,
@@ -6232,59 +4816,59 @@ api.get("/admin/plans", adminMiddleware, (_req, res) => {
       lock_days: Number(p.lock_days),
       profit_percentage: fmt(p.profit_percentage),
       maturity_percentage: fmt(p.maturity_percentage),
-      display_order: Number(p.display_order),
+      display_order: Number(p.sort_order || p.display_order || 0),
       is_active: Boolean(p.is_active),
       version: Number(p.version || 1),
       updated_at: p.updated_at,
     }));
-  res.json(list);
+    return res.json(list);
+  } catch (err: any) {
+    console.error("[Admin Plans] Supabase fetch error:", err?.message);
+    return res.status(503).json({ detail: "Plans temporarily unavailable from authoritative database." });
+  }
 });
 
-api.put("/admin/plans/:key", adminMiddleware, (req, res) => {
+api.put("/admin/plans/:key", adminMiddleware, async (req, res) => {
   const admin = (req as any).user;
-  const plan = db.investment_plans.get(req.params.key);
-  if (!plan) return res.status(404).json({ detail: "Plan not found." });
+  try {
+    const updated = await supabaseDb.updateInvestmentPlan({
+      key: req.params.key,
+      name: req.body.name,
+      price: req.body.price,
+      profit_percentage: req.body.profit_percentage,
+      maturity_percentage: req.body.maturity_percentage,
+      lock_days: req.body.lock_days,
+      is_active: req.body.is_active,
+      adminId: admin.id,
+      adminEmail: admin.email,
+    });
 
-  const before = { ...plan };
-  if (req.body.name) plan.name = String(req.body.name).trim();
-  if (req.body.price) plan.price = fmt(req.body.price);
-  if (req.body.profit_percentage) plan.profit_percentage = fmt(req.body.profit_percentage);
-  if (req.body.maturity_percentage) plan.maturity_percentage = fmt(req.body.maturity_percentage);
-  if (req.body.lock_days) plan.lock_days = Number(req.body.lock_days);
-  if (req.body.is_active !== undefined) plan.is_active = Boolean(req.body.is_active);
-
-  plan.version = Number(plan.version || 1) + 1;
-  plan.updated_at = nowIso();
-
-  db.plan_history.unshift({
-    id: genId(),
-    plan_key: plan.key,
-    version: plan.version,
-    before,
-    snapshot: { ...plan },
-    admin_id: admin.id,
-    created_at: nowIso(),
-  });
-
-  logAudit("plan.update", admin, "investment_plan", plan.key, req.body);
-  res.json({
-    id: plan.id,
-    key: plan.key,
-    name: plan.name,
-    price: fmt(plan.price),
-    lock_days: Number(plan.lock_days),
-    profit_percentage: fmt(plan.profit_percentage),
-    maturity_percentage: fmt(plan.maturity_percentage),
-    display_order: Number(plan.display_order),
-    is_active: Boolean(plan.is_active),
-    version: Number(plan.version),
-    updated_at: plan.updated_at,
-  });
+    return res.json({
+      id: updated.id,
+      key: updated.key,
+      name: updated.name,
+      price: fmt(updated.price),
+      lock_days: Number(updated.lock_days),
+      profit_percentage: fmt(updated.profit_percentage),
+      maturity_percentage: fmt(updated.maturity_percentage),
+      display_order: Number(updated.sort_order || 0),
+      is_active: Boolean(updated.is_active),
+      version: Number(updated.version || 1),
+      updated_at: updated.updated_at,
+    });
+  } catch (err: any) {
+    return res.status(400).json({ detail: err.message || "Failed to update plan." });
+  }
 });
 
-api.get("/admin/plans/:key/history", adminMiddleware, (req, res) => {
-  const list = db.plan_history.filter((h) => h.plan_key === req.params.key);
-  res.json(list);
+api.get("/admin/plans/:key/history", adminMiddleware, async (req, res) => {
+  try {
+    const list = await supabaseDb.getPlanHistory(req.params.key);
+    return res.json(list);
+  } catch (err: any) {
+    console.error("[Admin Plan History] Supabase fetch error:", err?.message);
+    return res.status(503).json({ detail: "Plan history temporarily unavailable." });
+  }
 });
 
 // Admin KYC
@@ -6292,41 +4876,10 @@ api.get("/admin/kyc", adminMiddleware, async (req, res) => {
   const { status } = req.query;
   try {
     const list = await supabaseDb.getAllKyc(status as string);
-    res.json(list);
+    return res.json(list);
   } catch (err: any) {
-    let list = Array.from(db.kyc_records.values());
-    if (status) list = list.filter((k) => k.status === status);
-
-    const out = list
-      .sort((a, b) => new Date(b.submitted_at).getTime() - new Date(a.submitted_at).getTime())
-      .map((k) => {
-        const u = db.users.get(k.user_id);
-        const docs = Array.from(db.kyc_documents.values())
-          .filter((d) => d.user_id === k.user_id)
-          .map((d) => ({ id: d.id, doc_type: d.doc_type, mime: d.mime }));
-
-        return {
-          id: k.id,
-          user_id: k.user_id,
-          user_name: u?.name || null,
-          user_email: u?.email || null,
-          user_phone: u?.phone || null,
-          status: k.status,
-          id_type: k.id_type,
-          id_number: k.id_number || k.id_number_masked || null,
-          id_number_masked: k.id_number_masked || null,
-          id_number_present: Boolean(k.id_number || k.id_number_encrypted),
-          address: k.address || k.permanent_address || u?.address || null,
-          permanent_address: k.permanent_address || k.address || u?.permanent_address || u?.address || null,
-          liveness: k.liveness_metadata || null,
-          reject_reason: k.reject_reason,
-          submitted_at: k.submitted_at,
-          reviewed_at: k.reviewed_at,
-          documents: docs,
-        };
-      });
-
-    res.json(out);
+    console.error("[Admin KYC] Supabase fetch error:", err?.message);
+    return res.status(503).json({ detail: "KYC data temporarily unavailable from authoritative database." });
   }
 });
 
@@ -6336,21 +4889,9 @@ api.post("/admin/kyc/:id/approve", adminMiddleware, async (req, res) => {
     const updated = await supabaseDb.adminReviewKyc({
       kycIdOrUserId: req.params.id,
       adminId: admin.id,
+      adminEmail: admin.email,
       decision: "approve",
     });
-
-    // Mirror in local db
-    for (const k of db.kyc_records.values()) {
-      if (k.id === req.params.id || k.user_id === req.params.id) {
-        k.status = "approved";
-        k.admin_id = admin.id;
-        k.reviewed_at = nowIso();
-        k.updated_at = nowIso();
-        const user = db.users.get(k.user_id);
-        if (user) user.kyc_status = "approved";
-        break;
-      }
-    }
 
     res.json({ ok: true, status: "approved", record: updated });
   } catch (err: any) {
@@ -6366,23 +4907,10 @@ api.post("/admin/kyc/:id/reject", adminMiddleware, async (req, res) => {
     const updated = await supabaseDb.adminReviewKyc({
       kycIdOrUserId: req.params.id,
       adminId: admin.id,
+      adminEmail: admin.email,
       decision: "reject",
       rejectReason: reason,
     });
-
-    // Mirror in local db
-    for (const k of db.kyc_records.values()) {
-      if (k.id === req.params.id || k.user_id === req.params.id) {
-        k.status = "rejected";
-        k.reject_reason = reason;
-        k.admin_id = admin.id;
-        k.reviewed_at = nowIso();
-        k.updated_at = nowIso();
-        const user = db.users.get(k.user_id);
-        if (user) user.kyc_status = "rejected";
-        break;
-      }
-    }
 
     res.json({ ok: true, status: "rejected", record: updated });
   } catch (err: any) {
@@ -6391,198 +4919,70 @@ api.post("/admin/kyc/:id/reject", adminMiddleware, async (req, res) => {
 });
 
 // Admin Update KYC Details (ID Type, ID Number, Address, User Name, Status, Note)
-api.put("/admin/kyc/:id", adminMiddleware, (req, res) => {
+api.put("/admin/kyc/:id", adminMiddleware, async (req, res) => {
   const admin = (req as any).user;
-  let record: any = null;
-  // Can match by kyc record id or by user_id
-  for (const k of db.kyc_records.values()) {
-    if (k.id === req.params.id || k.user_id === req.params.id) {
-      record = k;
-      break;
-    }
-  }
-
   const { name, id_type, id_number, address, permanent_address, status, admin_note } = req.body || {};
 
-  let user = record ? db.users.get(record.user_id) : db.users.get(req.params.id);
-  if (!user && !record) {
-    return res.status(404).json({ detail: "User or KYC record not found." });
+  try {
+    const result = await supabaseDb.updateKycAdminDetails({
+      kycIdOrUserId: req.params.id,
+      name,
+      id_type,
+      id_number,
+      address,
+      permanent_address,
+      status,
+      admin_note,
+      adminId: admin.id,
+      adminEmail: admin.email,
+    });
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(400).json({ detail: err.message || "Failed to update KYC" });
   }
-
-  // If no KYC record exists for user yet, create one
-  if (!record && user) {
-    const recId = genId();
-    record = {
-      id: recId,
-      user_id: user.id,
-      id_type: id_type ? sanitizePlainText(id_type).toLowerCase() : "aadhaar",
-      status: status || "approved",
-      submitted_at: nowIso(),
-      created_at: nowIso(),
-    };
-    db.kyc_records.set(user.id, record);
-  }
-
-  const ts = nowIso();
-  const changes: Record<string, any> = {};
-
-  // 1. Update user full legal name if specified
-  if (typeof name === "string" && name.trim()) {
-    const cleanName = sanitizePlainText(name.trim(), 100);
-    if (user && cleanName && cleanName !== user.name) {
-      changes.name = { old: user.name, new: cleanName };
-      user.name = cleanName;
-    }
-  }
-
-  // 2. Update ID document type
-  if (typeof id_type === "string" && id_type.trim()) {
-    const cleanType = sanitizePlainText(id_type.trim().toLowerCase(), 50);
-    if (cleanType !== record.id_type) {
-      changes.id_type = { old: record.id_type, new: cleanType };
-      record.id_type = cleanType;
-    }
-  }
-
-  // 3. Update ID number
-  if (typeof id_number === "string" && id_number.trim()) {
-    const cleanNum = sanitizePlainText(id_number.trim(), 64);
-    changes.id_number = { old: record.id_number_masked || record.id_number, new: cleanNum };
-    record.id_number = cleanNum;
-    if (record.id_type === "aadhaar") {
-      const digits = cleanNum.replace(/[\s-]/g, "");
-      record.id_number_masked = digits.length >= 4 ? `XXXX-XXXX-${digits.slice(-4)}` : cleanNum;
-    } else {
-      record.id_number_masked = cleanNum.length > 4 ? `${cleanNum.slice(0, 2)}***${cleanNum.slice(-2)}` : cleanNum;
-    }
-    record.id_number_encrypted = Buffer.from(cleanNum).toString("base64");
-    if (user) user.id_number = cleanNum;
-  }
-
-  // 4. Update permanent residential address
-  const targetAddress = permanent_address || address;
-  if (typeof targetAddress === "string" && targetAddress.trim()) {
-    const cleanAddr = sanitizePlainText(targetAddress.trim(), 500);
-    changes.address = { old: record.permanent_address || record.address, new: cleanAddr };
-    record.address = cleanAddr;
-    record.permanent_address = cleanAddr;
-    if (user) {
-      user.address = cleanAddr;
-      user.permanent_address = cleanAddr;
-    }
-  }
-
-  // 5. Update Status
-  if (typeof status === "string" && ["approved", "pending", "rejected", "none"].includes(status)) {
-    if (status !== record.status) {
-      changes.status = { old: record.status, new: status };
-      record.status = status;
-      if (user) user.kyc_status = status;
-      if (status === "approved") {
-        record.reviewed_at = ts;
-      }
-    }
-  }
-
-  const cleanNote = typeof admin_note === "string" ? sanitizePlainText(admin_note.trim(), 500) : "";
-  record.admin_note = cleanNote || record.admin_note || null;
-  record.admin_id = admin.id;
-  record.updated_at = ts;
-
-  saveDatabase();
-
-  logAudit("kyc.admin_update", admin, "kyc_record", record.id, { changes, note: cleanNote });
-  if (user) {
-    createNotification(
-      user.id,
-      "kyc_updated",
-      "KYC Verification Updated",
-      cleanNote
-        ? `Your identity verification details were updated by admin: ${cleanNote}`
-        : "Your verified KYC identity details have been updated by administration.",
-      `kyc_update:${record.id}`
-    );
-  }
-
-  res.json({
-    ok: true,
-    record: {
-      ...record,
-      user_name: user?.name || null,
-      user_email: user?.email || null,
-    },
-    user: user ? cleanUser(user) : null,
-    changes,
-  });
 });
 
 // Admin Unlock KYC for User Resubmission
-api.post("/admin/kyc/:id/unlock", adminMiddleware, (req, res) => {
+api.post("/admin/kyc/:id/unlock", adminMiddleware, async (req, res) => {
   const admin = (req as any).user;
-  let record: any = null;
-  for (const k of db.kyc_records.values()) {
-    if (k.id === req.params.id || k.user_id === req.params.id) {
-      record = k;
-      break;
-    }
-  }
-
-  let user = record ? db.users.get(record.user_id) : db.users.get(req.params.id);
-  if (!user && !record) {
-    return res.status(404).json({ detail: "KYC record or user not found" });
-  }
-
   const reason = sanitizePlainText(req.body.reason || "Unlocked by administrator upon user support request to allow re-submission.", 500);
-  const ts = nowIso();
 
-  if (record) {
-    record.status = "rejected";
-    record.reject_reason = reason;
-    record.admin_id = admin.id;
-    record.updated_at = ts;
+  try {
+    await supabaseDb.adminReviewKyc({
+      kycIdOrUserId: req.params.id,
+      adminId: admin.id,
+      adminEmail: admin.email,
+      decision: "reject",
+      rejectReason: reason,
+    });
+    res.json({ ok: true, status: "rejected", message: "KYC unlocked for user resubmission" });
+  } catch (err: any) {
+    return res.status(400).json({ detail: err.message || "Failed to unlock KYC" });
   }
-  if (user) {
-    user.kyc_status = "rejected";
-  }
-
-  saveDatabase();
-
-  logAudit("kyc.unlock", admin, "kyc_record", record?.id || user?.id, { reason });
-  if (user) {
-    createNotification(
-      user.id,
-      "kyc_unlocked",
-      "KYC Unlocked for Re-submission",
-      `Your KYC verification has been unlocked by admin: ${reason}. You can now edit all details and submit updated documents on the KYC page.`,
-      `kyc_unlocked:${record?.id || user.id}`
-    );
-  }
-
-  res.json({ ok: true, status: "rejected", message: "KYC unlocked for user resubmission" });
 });
 
 // Admin Direct Route for User KYC update by user ID
-api.put("/admin/users/:userId/kyc", adminMiddleware, (req, res) => {
-  req.params.id = req.params.userId;
-  // Route to kyc handler directly
-  let record: any = null;
-  for (const k of db.kyc_records.values()) {
-    if (k.user_id === req.params.userId || k.id === req.params.userId) {
-      record = k;
-      break;
-    }
+api.put("/admin/users/:userId/kyc", adminMiddleware, async (req, res) => {
+  const admin = (req as any).user;
+  const { name, id_type, id_number, address, permanent_address, status, admin_note } = req.body || {};
+
+  try {
+    const result = await supabaseDb.updateKycAdminDetails({
+      kycIdOrUserId: req.params.userId,
+      name,
+      id_type,
+      id_number,
+      address,
+      permanent_address,
+      status,
+      admin_note,
+      adminId: admin.id,
+      adminEmail: admin.email,
+    });
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(400).json({ detail: err.message || "Failed to update KYC" });
   }
-  if (record) {
-    req.params.id = record.id;
-  }
-  const handler = (api as any)._router?.stack?.find((layer: any) => layer.route?.path === "/admin/kyc/:id" && layer.route?.methods?.put);
-  if (handler) {
-    return handler.handle(req, res);
-  }
-  // Fallback direct execution
-  const user = db.users.get(req.params.userId);
-  if (!user) return res.status(404).json({ detail: "User not found" });
-  res.json({ ok: true, user: cleanUser(user) });
 });
 
 api.post("/admin/kyc/batch-approve", adminMiddleware, async (req, res) => {
@@ -6594,50 +4994,19 @@ api.post("/admin/kyc/batch-approve", adminMiddleware, async (req, res) => {
   const errors: { id: string; error: string }[] = [];
 
   for (const id of ids) {
-    let record: any = null;
-    for (const k of db.kyc_records.values()) {
-      if (k.id === id || k.user_id === id) {
-        record = k;
-        break;
-      }
-    }
-
-    // 1. Authoritative update in Supabase
     try {
-      await supabaseDb.adminReviewKyc({
-        kycIdOrUserId: record ? (record.user_id || record.id) : id,
+      const rec = await supabaseDb.adminReviewKyc({
+        kycIdOrUserId: id,
         adminId: admin.id,
+        adminEmail: admin.email,
         decision: "approve",
       });
+      approved.push({ id, user_id: rec?.user_id || id });
     } catch (sbErr: any) {
-      console.warn(`[BatchKYC] Supabase review note for ${id}:`, sbErr?.message);
-    }
-
-    // 2. Mirror in local memory
-    if (record) {
-      record.status = "approved";
-      record.admin_id = admin.id;
-      record.reviewed_at = nowIso();
-      record.updated_at = nowIso();
-
-      const user = db.users.get(record.user_id);
-      if (user) user.kyc_status = "approved";
-
-      logAudit("kyc.batch_approve", admin, "kyc_record", record.id);
-      createNotification(
-        record.user_id,
-        "kyc_approved",
-        "KYC approved",
-        "Your identity verification was approved. You can now withdraw funds.",
-        `kyc_approved:${record.id}`
-      );
-      approved.push({ id: record.id, user_id: record.user_id });
-    } else {
-      approved.push({ id });
+      errors.push({ id, error: sbErr?.message || "Failed to approve" });
     }
   }
 
-  saveDatabase();
   res.json({ success: true, count: approved.length, approved, errors });
 });
 
@@ -6651,52 +5020,20 @@ api.post("/admin/kyc/batch-reject", adminMiddleware, async (req, res) => {
   const errors: { id: string; error: string }[] = [];
 
   for (const id of ids) {
-    let record: any = null;
-    for (const k of db.kyc_records.values()) {
-      if (k.id === id || k.user_id === id) {
-        record = k;
-        break;
-      }
-    }
-
-    // 1. Authoritative update in Supabase
     try {
-      await supabaseDb.adminReviewKyc({
-        kycIdOrUserId: record ? (record.user_id || record.id) : id,
+      const rec = await supabaseDb.adminReviewKyc({
+        kycIdOrUserId: id,
         adminId: admin.id,
+        adminEmail: admin.email,
         decision: "reject",
         rejectReason: reason,
       });
+      rejected.push({ id, user_id: rec?.user_id || id });
     } catch (sbErr: any) {
-      console.warn(`[BatchKYC] Supabase reject note for ${id}:`, sbErr?.message);
-    }
-
-    // 2. Mirror in local memory
-    if (record) {
-      record.status = "rejected";
-      record.reject_reason = reason;
-      record.admin_id = admin.id;
-      record.reviewed_at = nowIso();
-      record.updated_at = nowIso();
-
-      const user = db.users.get(record.user_id);
-      if (user) user.kyc_status = "rejected";
-
-      logAudit("kyc.batch_reject", admin, "kyc_record", record.id, { reason });
-      createNotification(
-        record.user_id,
-        "kyc_rejected",
-        "KYC rejected",
-        `Your identity verification was rejected: ${reason}. Please resubmit.`,
-        `kyc_rejected:${record.id}`
-      );
-      rejected.push({ id: record.id, user_id: record.user_id });
-    } else {
-      rejected.push({ id });
+      errors.push({ id, error: sbErr?.message || "Failed to reject" });
     }
   }
 
-  saveDatabase();
   res.json({ success: true, count: rejected.length, rejected, errors });
 });
 
@@ -6716,185 +5053,89 @@ api.post("/admin/kyc/batch-set-status", adminMiddleware, async (req, res) => {
   const errors: { id: string; error: string }[] = [];
 
   for (const id of ids) {
-    let record: any = null;
-    for (const k of db.kyc_records.values()) {
-      if (k.id === id || k.user_id === id) {
-        record = k;
-        break;
-      }
-    }
-
-    // 1. Authoritative update in Supabase
-    if (status === "approved" || status === "rejected") {
-      try {
-        await supabaseDb.adminReviewKyc({
-          kycIdOrUserId: record ? (record.user_id || record.id) : id,
+    try {
+      if (status === "approved" || status === "rejected") {
+        const rec = await supabaseDb.adminReviewKyc({
+          kycIdOrUserId: id,
           adminId: admin.id,
+          adminEmail: admin.email,
           decision: status as "approve" | "reject",
           rejectReason: status === "rejected" ? reason || "Identity documents rejected by admin" : undefined,
         });
-      } catch (sbErr: any) {
-        console.warn(`[BatchKYC] Supabase set-status note for ${id}:`, sbErr?.message);
+        updated.push({ id, user_id: rec?.user_id || id, status });
+      } else {
+        await supabaseDb.setKycStatus({
+          kycIdOrUserId: id,
+          status: "pending",
+          adminId: admin.id,
+          adminEmail: admin.email,
+        });
+        updated.push({ id, status: "pending" });
       }
-    }
-
-    // 2. Mirror in local memory
-    if (record) {
-      if (status === "approved") {
-        record.status = "approved";
-        record.admin_id = admin.id;
-        record.reviewed_at = nowIso();
-        record.updated_at = nowIso();
-
-        const user = db.users.get(record.user_id);
-        if (user) user.kyc_status = "approved";
-
-        logAudit("kyc.batch_approve", admin, "kyc_record", record.id);
-        createNotification(
-          record.user_id,
-          "kyc_approved",
-          "KYC approved",
-          "Your identity verification was approved. You can now withdraw funds.",
-          `kyc_approved:${record.id}`
-        );
-      } else if (status === "rejected") {
-        record.status = "rejected";
-        record.reject_reason = reason || "Identity documents rejected by admin";
-        record.admin_id = admin.id;
-        record.reviewed_at = nowIso();
-        record.updated_at = nowIso();
-
-        const user = db.users.get(record.user_id);
-        if (user) user.kyc_status = "rejected";
-
-        logAudit("kyc.batch_reject", admin, "kyc_record", record.id, { reason: record.reject_reason });
-        createNotification(
-          record.user_id,
-          "kyc_rejected",
-          "KYC rejected",
-          `Your identity verification was rejected: ${record.reject_reason}. Please resubmit.`,
-          `kyc_rejected:${record.id}`
-        );
-      } else if (status === "pending") {
-        record.status = "pending";
-        record.reject_reason = null;
-        record.admin_id = null;
-        record.reviewed_at = null;
-        record.updated_at = nowIso();
-
-        const user = db.users.get(record.user_id);
-        if (user) user.kyc_status = "pending";
-
-        logAudit("kyc.batch_pending", admin, "kyc_record", record.id);
-      }
-      updated.push({ id: record.id, user_id: record.user_id, status: record.status });
-    } else {
-      updated.push({ id, status });
+    } catch (sbErr: any) {
+      errors.push({ id, error: sbErr?.message || "Failed to set status" });
     }
   }
-
-  saveDatabase();
 
   res.json({ success: true, count: updated.length, status, updated, errors });
 });
 
 // Admin Referrals Overview
-api.get("/admin/referrals", adminMiddleware, (_req, res) => {
-  const relationships = Array.from(db.users.values())
-    .filter((u) => u.referred_by)
-    .map((u) => {
-      const referrer = db.users.get(u.referred_by);
-      return {
-        referrer: { id: referrer?.id, name: referrer?.name, email: referrer?.email },
-        referee: { id: u.id, name: u.name, email: u.email },
-        joined_at: u.created_at,
-      };
-    })
-    .sort((a, b) => new Date(b.joined_at).getTime() - new Date(a.joined_at).getTime());
-
-  const commissions = Array.from(db.referral_commissions.values())
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-    .map((c) => {
-      const referrer = db.users.get(c.referrer_id);
-      const referee = db.users.get(c.referee_id);
-      return {
-        id: c.id,
-        referrer: { id: referrer?.id, name: referrer?.name, email: referrer?.email },
-        referee: { id: referee?.id, name: referee?.name, email: referee?.email },
-        investment_id: c.investment_id,
-        plan_key: c.plan_key,
-        amount: fmt(c.amount),
-        percentage: fmt(c.percentage),
-        status: c.status,
-        created_at: c.created_at,
-      };
-    });
-
-  const totalPaid = commissions
-    .filter((c) => c.status === "paid")
-    .reduce((sum, c) => sum + Number(c.amount), 0);
-
-  res.json({
-    stats: {
-      total_relationships: relationships.length,
-      total_referrers: new Set(relationships.map((r) => r.referrer?.id).filter(Boolean)).size,
-      total_commissions: commissions.length,
-      total_commissions_paid: commissions.filter((c) => c.status === "paid").length,
-      total_commission_amount: fmt(totalPaid),
-    },
-    relationships,
-    commissions,
-  });
+api.get("/admin/referrals", adminMiddleware, async (_req, res) => {
+  try {
+    const data = await supabaseDb.getAllReferralsAdmin();
+    return res.json(data);
+  } catch (err: any) {
+    console.error("[Admin Referrals] Supabase fetch error:", err?.message);
+    return res.status(503).json({ detail: "Referral data temporarily unavailable from authoritative database." });
+  }
 });
 
 // Admin Wallet Adjustments & Ledger Overview
-api.get("/admin/wallet/transactions", adminMiddleware, (req, res) => {
+api.get("/admin/wallet/transactions", adminMiddleware, async (req, res) => {
   const { user_id, type, direction, q } = req.query as Record<string, string>;
-  let list = Array.from(db.wallet_transactions.values()).map((tx) => {
-    const user = db.users.get(tx.user_id);
-    const wallet = db.wallets.get(tx.user_id);
-    return {
-      ...tx,
-      user: user ? { id: user.id, name: user.name, email: user.email, phone: user.phone } : null,
-      wallet: wallet ? { available_balance: wallet.available_balance, total_invested: wallet.total_invested, total_earned: wallet.total_earned } : null,
-    };
-  });
+  try {
+    let list = await supabaseDb.getAllTransactions({
+      userId: user_id,
+      type,
+      direction,
+      limit: 300,
+    });
 
-  if (user_id) list = list.filter((tx) => tx.user_id === user_id);
-  if (type) list = list.filter((tx) => tx.type === type);
-  if (direction) list = list.filter((tx) => tx.direction === direction);
-  if (q) {
-    const cleanQ = q.trim().toLowerCase();
-    list = list.filter(
-      (tx) =>
-        tx.id.toLowerCase().includes(cleanQ) ||
-        tx.note?.toLowerCase().includes(cleanQ) ||
-        tx.user?.name?.toLowerCase().includes(cleanQ) ||
-        tx.user?.email?.toLowerCase().includes(cleanQ) ||
-        tx.user_id?.toLowerCase().includes(cleanQ)
-    );
+    if (q) {
+      const cleanQ = q.trim().toLowerCase();
+      list = list.filter(
+        (tx) =>
+          tx.id?.toLowerCase().includes(cleanQ) ||
+          tx.note?.toLowerCase().includes(cleanQ) ||
+          tx.user?.name?.toLowerCase().includes(cleanQ) ||
+          tx.user?.email?.toLowerCase().includes(cleanQ) ||
+          tx.user_id?.toLowerCase().includes(cleanQ)
+      );
+    }
+
+    // Aggregate stats
+    const totalAdjustments = list.filter((tx) => tx.type === "ADMIN_ADJUSTMENT");
+    const totalCredited = totalAdjustments
+      .filter((tx) => tx.direction === "credit")
+      .reduce((sum, tx) => sum + Number(tx.amount || 0), 0);
+    const totalDebited = totalAdjustments
+      .filter((tx) => tx.direction === "debit")
+      .reduce((sum, tx) => sum + Number(tx.amount || 0), 0);
+
+    return res.json({
+      stats: {
+        total_ledger_tx: list.length,
+        total_adjustments: totalAdjustments.length,
+        total_adjusted_credited: fmt(totalCredited),
+        total_adjusted_debited: fmt(totalDebited),
+      },
+      transactions: list,
+    });
+  } catch (err: any) {
+    console.error("[Admin Wallet Transactions] Supabase fetch error:", err?.message);
+    return res.status(503).json({ detail: "Transaction data temporarily unavailable from authoritative database." });
   }
-
-  list.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-
-  // Aggregate stats
-  const totalAdjustments = list.filter((tx) => tx.type === "ADMIN_ADJUSTMENT");
-  const totalCredited = totalAdjustments
-    .filter((tx) => tx.direction === "credit")
-    .reduce((sum, tx) => sum + Number(tx.amount || 0), 0);
-  const totalDebited = totalAdjustments
-    .filter((tx) => tx.direction === "debit")
-    .reduce((sum, tx) => sum + Number(tx.amount || 0), 0);
-
-  res.json({
-    stats: {
-      total_ledger_tx: list.length,
-      total_adjustments: totalAdjustments.length,
-      total_adjusted_credited: fmt(totalCredited),
-      total_adjusted_debited: fmt(totalDebited),
-    },
-    transactions: list.slice(0, 300),
-  });
 });
 
 // Admin Wallet Adjust (Strict Ledger & Audit Enforced)
@@ -6903,9 +5144,6 @@ api.post("/admin/wallet/adjust", adminMiddleware, async (req, res) => {
   const { user_id, amount, direction, reason, note, idempotency_key } = req.body;
 
   if (!user_id) return res.status(400).json({ detail: "User ID is required." });
-  const target = db.users.get(user_id);
-  if (!target) return res.status(404).json({ detail: "Target user not found." });
-
   const finalReason = String(reason || note || "").trim();
   if (finalReason.length < 3) {
     return res.status(422).json({ detail: "A valid adjustment reason (min 3 characters) is required for audit trails." });
@@ -6920,72 +5158,18 @@ api.post("/admin/wallet/adjust", adminMiddleware, async (req, res) => {
     return res.status(422).json({ detail: "Adjustment direction must be either 'credit' or 'debit'." });
   }
 
-  const userWallet = getOrCreateWallet(user_id);
-  const curBal = Number(userWallet.available_balance || 0);
-
-  // Prevent negative balance on debit
-  if (direction === "debit" && curBal < amt) {
-    return res.status(422).json({
-      detail: `Insufficient balance. User only has $${fmt(curBal)} USDT available, cannot debit $${fmt(amt)} USDT.`,
-      current_balance: fmt(curBal),
-      requested_debit: fmt(amt),
-    });
-  }
-
-  const finalIdempotencyKey = idempotency_key || `admin_adj_${user_id}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-
   try {
-    let tx;
-    if (direction === "credit") {
-      tx = await creditWallet(
-        user_id,
-        fmt(amt),
-        "ADMIN_ADJUSTMENT",
-        "admin_adjustment",
-        admin.id,
-        finalIdempotencyKey,
-        finalReason
-      );
-    } else {
-      tx = await debitWallet(
-        user_id,
-        fmt(amt),
-        "ADMIN_ADJUSTMENT",
-        "admin_adjustment",
-        admin.id,
-        finalIdempotencyKey,
-        finalReason
-      );
-    }
-
-    // Explicit Audit Log with full context
-    logAudit("wallet.adjust", admin, "wallet", userWallet.id, {
-      user_id,
-      user_email: target.email,
+    const result = await supabaseDb.adminAdjustWallet({
+      userId: user_id,
+      amount: amt,
       direction,
-      amount: fmt(amt),
-      previous_balance: fmt(curBal),
-      balance_after: tx.balance_after,
+      adminId: admin.id,
+      adminEmail: admin.email,
       reason: finalReason,
-      ledger_tx_id: tx.id,
-      idempotency_key: finalIdempotencyKey,
+      idempotencyKey: idempotency_key,
     });
 
-    // Notify user of administrative wallet adjustment
-    createNotification(
-      user_id,
-      "wallet_adjustment",
-      `Wallet ${direction === "credit" ? "Credited" : "Debited"} ($${fmt(amt)} USDT)`,
-      `An administrator has ${direction === "credit" ? "credited" : "debited"} $${fmt(amt)} USDT to your wallet. Reason: ${finalReason}. Balance: $${tx.balance_after} USDT.`,
-      `adj:${tx.id}`
-    );
-
-    return res.json({
-      ok: true,
-      transaction: tx,
-      user: { id: target.id, name: target.name, email: target.email },
-      wallet: { available_balance: userWallet.available_balance },
-    });
+    return res.json(result);
   } catch (err: any) {
     return res.status(err.status || 400).json({ detail: err.message || "Failed to adjust wallet" });
   }
@@ -7019,32 +5203,8 @@ api.get("/admin/audit-logs", adminMiddleware, (req, res) => {
     let targetUserEmail = item.target_user_email || item.meta?.target_user_email || item.meta?.user_email || null;
 
     if (!targetUserId && item.entity_type && item.entity_id) {
-      if (item.entity_type === "deposit") {
-        const dep = db.deposits.get(item.entity_id);
-        if (dep) targetUserId = dep.user_id;
-      } else if (item.entity_type === "withdrawal") {
-        const w = db.withdrawals.get(item.entity_id);
-        if (w) targetUserId = w.user_id;
-      } else if (item.entity_type === "kyc_record") {
-        for (const k of db.kyc_records.values()) {
-          if (k.id === item.entity_id) {
-            targetUserId = k.user_id;
-            break;
-          }
-        }
-      } else if (item.entity_type === "user") {
+      if (item.entity_type === "user") {
         targetUserId = item.entity_id;
-      } else if (item.entity_type === "investment") {
-        const inv = db.investments.get(item.entity_id);
-        if (inv) targetUserId = inv.user_id;
-      }
-    }
-
-    if (targetUserId && (!targetUserName || !targetUserEmail)) {
-      const u = db.users.get(targetUserId);
-      if (u) {
-        targetUserName = targetUserName || u.name;
-        targetUserEmail = targetUserEmail || u.email;
       }
     }
 
@@ -7299,7 +5459,7 @@ api.get("/admin/reports", adminMiddleware, (_req, res) => {
   });
 });
 
-api.get("/admin/reports/:dataset", adminMiddleware, (req, res) => {
+api.get("/admin/reports/:dataset", adminMiddleware, async (req, res) => {
   const admin = (req as any).user;
   const dataset = req.params.dataset;
   const q = String(req.query.q || "").toLowerCase().trim();
@@ -7318,7 +5478,6 @@ api.get("/admin/reports/:dataset", adminMiddleware, (req, res) => {
     }
     if (toDateStr) {
       let toT = new Date(toDateStr).getTime();
-      // If only YYYY-MM-DD was provided, include the whole day
       if (!isNaN(toT)) {
         if (toDateStr.length === 10) toT += 86400000 - 1;
         if (t > toT) return false;
@@ -7327,19 +5486,13 @@ api.get("/admin/reports/:dataset", adminMiddleware, (req, res) => {
     return true;
   };
 
-  const getUserSafe = (userId: string) => {
-    const u = db.users.get(userId);
-    if (!u) return { id: userId, name: "Unknown User", email: "N/A", phone: "N/A" };
-    return { id: u.id, name: u.name, email: u.email, phone: u.phone, referral_code: u.referral_code };
-  };
-
   let rows: any[] = [];
   let summary: Record<string, any> = {};
 
-  if (dataset === "users") {
-    let list = Array.from(db.users.values()).map((u) => {
-      const w = db.wallets.get(u.id) || { available_balance: "0.00", locked_balance: "0.00" };
-      return {
+  try {
+    if (dataset === "users") {
+      const usersData = await supabaseDb.getAdminUsers({ query: q, status: statusFilter });
+      let list = (usersData.users || []).map((u: any) => ({
         id: u.id,
         name: u.name,
         email: u.email,
@@ -7348,180 +5501,148 @@ api.get("/admin/reports/:dataset", adminMiddleware, (req, res) => {
         status: u.status,
         kyc_status: u.kyc_status || "none",
         email_verified: u.email_verified ? "Yes" : "No",
-        available_balance: w.available_balance || "0.00",
-        locked_balance: w.locked_balance || "0.00",
+        available_balance: u.wallet?.available_balance || "0.00",
+        locked_balance: u.wallet?.locked_investment || "0.00",
         referral_code: u.referral_code || "—",
         referred_by: u.referred_by || "—",
         created_at: u.created_at,
         last_login_at: u.last_login_at || "—",
+      }));
+      list = list.filter((u: any) => isDateInRange(u.created_at));
+      const totalBal = list.reduce((acc: number, u: any) => acc + Number(u.available_balance || 0), 0);
+      summary = {
+        total_records: list.length,
+        active_users: list.filter((u: any) => u.status === "active").length,
+        suspended_users: list.filter((u: any) => u.status === "suspended").length,
+        kyc_approved: list.filter((u: any) => u.kyc_status === "approved").length,
+        total_available_balance: fmt(totalBal),
       };
-    });
-
-    if (q) {
-      list = list.filter(
-        (u) =>
-          (u.name && u.name.toLowerCase().includes(q)) ||
-          (u.email && u.email.toLowerCase().includes(q)) ||
-          (u.phone && u.phone.toLowerCase().includes(q)) ||
-          (u.referral_code && u.referral_code.toLowerCase().includes(q)) ||
-          (u.id && u.id.toLowerCase().includes(q))
-      );
-    }
-    if (statusFilter && statusFilter !== "all") {
-      list = list.filter((u) => u.status.toLowerCase() === statusFilter || u.kyc_status.toLowerCase() === statusFilter);
-    }
-    list = list.filter((u) => isDateInRange(u.created_at));
-
-    const totalBal = list.reduce((acc, u) => acc + Number(u.available_balance || 0), 0);
-    summary = {
-      total_records: list.length,
-      active_users: list.filter((u) => u.status === "active").length,
-      suspended_users: list.filter((u) => u.status === "suspended").length,
-      kyc_approved: list.filter((u) => u.kyc_status === "approved").length,
-      total_available_balance: fmt(totalBal),
-    };
-    rows = list;
-  } else if (dataset === "deposits") {
-    let list = Array.from(db.deposits.values()).map((d) => {
-      const u = getUserSafe(d.user_id);
-      return {
+      rows = list;
+    } else if (dataset === "deposits") {
+      const allDeps = await supabaseDb.getAllDeposits();
+      let list = allDeps.map((d: any) => ({
         id: d.id,
         user_id: d.user_id,
-        user_name: u.name,
-        user_email: u.email,
-        network: d.network,
+        user_name: d.user_name || "Investor",
+        user_email: d.user_email || "",
+        network: d.network || "TRC20",
         amount: fmt(d.amount),
         approved_amount: d.approved_amount ? fmt(d.approved_amount) : "—",
         status: d.status,
         tx_hash: d.tx_hash || "—",
         created_at: d.created_at,
         reviewed_at: d.reviewed_at || "—",
+      }));
+      if (q) {
+        list = list.filter(
+          (d: any) =>
+            d.id.toLowerCase().includes(q) ||
+            d.tx_hash.toLowerCase().includes(q) ||
+            d.user_name.toLowerCase().includes(q) ||
+            d.user_email.toLowerCase().includes(q) ||
+            d.network.toLowerCase().includes(q)
+        );
+      }
+      if (statusFilter && statusFilter !== "all") {
+        list = list.filter((d: any) => d.status.toLowerCase() === statusFilter);
+      }
+      list = list.filter((d: any) => isDateInRange(d.created_at));
+      const totalVol = list.reduce((acc: number, d: any) => acc + Number(d.amount || 0), 0);
+      const approvedVol = list
+        .filter((d: any) => d.status === "approved")
+        .reduce((acc: number, d: any) => acc + Number(d.approved_amount !== "—" ? d.approved_amount : d.amount || 0), 0);
+      summary = {
+        total_records: list.length,
+        total_volume: fmt(totalVol),
+        approved_volume: fmt(approvedVol),
+        pending_count: list.filter((d: any) => d.status === "pending").length,
+        approved_count: list.filter((d: any) => d.status === "approved").length,
+        rejected_count: list.filter((d: any) => d.status === "rejected").length,
       };
-    });
-
-    if (q) {
-      list = list.filter(
-        (d) =>
-          d.id.toLowerCase().includes(q) ||
-          d.tx_hash.toLowerCase().includes(q) ||
-          d.user_name.toLowerCase().includes(q) ||
-          d.user_email.toLowerCase().includes(q) ||
-          d.network.toLowerCase().includes(q)
-      );
-    }
-    if (statusFilter && statusFilter !== "all") {
-      list = list.filter((d) => d.status.toLowerCase() === statusFilter);
-    }
-    list = list.filter((d) => isDateInRange(d.created_at));
-
-    const totalVol = list.reduce((acc, d) => acc + Number(d.amount || 0), 0);
-    const approvedVol = list
-      .filter((d) => d.status === "approved")
-      .reduce((acc, d) => acc + Number(d.approved_amount !== "—" ? d.approved_amount : d.amount || 0), 0);
-
-    summary = {
-      total_records: list.length,
-      total_volume: fmt(totalVol),
-      approved_volume: fmt(approvedVol),
-      pending_count: list.filter((d) => d.status === "pending").length,
-      approved_count: list.filter((d) => d.status === "approved").length,
-      rejected_count: list.filter((d) => d.status === "rejected").length,
-    };
-    rows = list;
-  } else if (dataset === "investments") {
-    let list = Array.from(db.investments.values()).map((i) => {
-      const u = getUserSafe(i.user_id);
-      return {
+      rows = list;
+    } else if (dataset === "investments") {
+      const allInvs = await supabaseDb.getAllInvestments();
+      let list = allInvs.map((i: any) => ({
         id: i.id,
         user_id: i.user_id,
-        user_name: u.name,
-        user_email: u.email,
+        user_name: i.user_name || "Investor",
+        user_email: i.user_email || "",
         plan_key: i.plan_key,
         principal: fmt(i.principal),
         profit_amount: fmt(i.profit_amount),
         maturity_amount: fmt(i.maturity_amount),
         status: i.status,
         created_at: i.created_at,
-        matures_at: i.matures_at,
+        matures_at: i.maturity_at || i.matures_at,
+      }));
+      if (q) {
+        list = list.filter(
+          (i: any) =>
+            i.id.toLowerCase().includes(q) ||
+            i.plan_key.toLowerCase().includes(q) ||
+            i.user_name.toLowerCase().includes(q) ||
+            i.user_email.toLowerCase().includes(q)
+        );
+      }
+      if (statusFilter && statusFilter !== "all") {
+        list = list.filter((i: any) => i.status.toLowerCase() === statusFilter);
+      }
+      list = list.filter((i: any) => isDateInRange(i.created_at));
+      const totalPrincipal = list.reduce((acc: number, i: any) => acc + Number(i.principal || 0), 0);
+      const totalReturns = list.reduce((acc: number, i: any) => acc + Number(i.maturity_amount || 0), 0);
+      summary = {
+        total_records: list.length,
+        total_principal: fmt(totalPrincipal),
+        total_maturity_volume: fmt(totalReturns),
+        active_count: list.filter((i: any) => i.status === "active").length,
+        matured_count: list.filter((i: any) => i.status === "matured").length,
+        cancelled_count: list.filter((i: any) => i.status === "cancelled").length,
       };
-    });
-
-    if (q) {
-      list = list.filter(
-        (i) =>
-          i.id.toLowerCase().includes(q) ||
-          i.plan_key.toLowerCase().includes(q) ||
-          i.user_name.toLowerCase().includes(q) ||
-          i.user_email.toLowerCase().includes(q)
-      );
-    }
-    if (statusFilter && statusFilter !== "all") {
-      list = list.filter((i) => i.status.toLowerCase() === statusFilter);
-    }
-    list = list.filter((i) => isDateInRange(i.created_at));
-
-    const totalPrincipal = list.reduce((acc, i) => acc + Number(i.principal || 0), 0);
-    const totalReturns = list.reduce((acc, i) => acc + Number(i.maturity_amount || 0), 0);
-
-    summary = {
-      total_records: list.length,
-      total_principal: fmt(totalPrincipal),
-      total_maturity_volume: fmt(totalReturns),
-      active_count: list.filter((i) => i.status === "active").length,
-      matured_count: list.filter((i) => i.status === "matured").length,
-      cancelled_count: list.filter((i) => i.status === "cancelled").length,
-    };
-    rows = list;
-  } else if (dataset === "maturities" || dataset === "matured_investments") {
-    let list = Array.from(db.investments.values())
-      .filter((i) => i.status === "matured")
-      .map((i) => {
-        const u = getUserSafe(i.user_id);
-        return {
+      rows = list;
+    } else if (dataset === "maturities" || dataset === "matured_investments") {
+      const allInvs = await supabaseDb.getAllInvestments();
+      let list = allInvs
+        .filter((i: any) => i.status === "matured")
+        .map((i: any) => ({
           id: i.id,
           user_id: i.user_id,
-          user_name: u.name,
-          user_email: u.email,
+          user_name: i.user_name || "Investor",
+          user_email: i.user_email || "",
           plan_key: i.plan_key,
           principal: fmt(i.principal),
           profit_amount: fmt(i.profit_amount),
           maturity_amount: fmt(i.maturity_amount),
           status: "matured",
           created_at: i.created_at,
-          matures_at: i.matures_at,
-        };
-      });
-
-    if (q) {
-      list = list.filter(
-        (i) =>
-          i.id.toLowerCase().includes(q) ||
-          i.plan_key.toLowerCase().includes(q) ||
-          i.user_name.toLowerCase().includes(q) ||
-          i.user_email.toLowerCase().includes(q)
-      );
-    }
-    list = list.filter((i) => isDateInRange(i.matures_at || i.created_at));
-
-    const totalPrincipal = list.reduce((acc, i) => acc + Number(i.principal || 0), 0);
-    const totalProfit = list.reduce((acc, i) => acc + Number(i.profit_amount || 0), 0);
-    const totalPayout = list.reduce((acc, i) => acc + Number(i.maturity_amount || 0), 0);
-
-    summary = {
-      total_records: list.length,
-      total_principal_repaid: fmt(totalPrincipal),
-      total_profit_paid: fmt(totalProfit),
-      total_payout_volume: fmt(totalPayout),
-    };
-    rows = list;
-  } else if (dataset === "withdrawals") {
-    let list = Array.from(db.withdrawals.values()).map((w) => {
-      const u = getUserSafe(w.user_id);
-      return {
+          matures_at: i.maturity_at || i.matures_at,
+        }));
+      if (q) {
+        list = list.filter(
+          (i: any) =>
+            i.id.toLowerCase().includes(q) ||
+            i.plan_key.toLowerCase().includes(q) ||
+            i.user_name.toLowerCase().includes(q) ||
+            i.user_email.toLowerCase().includes(q)
+        );
+      }
+      list = list.filter((i: any) => isDateInRange(i.matures_at || i.created_at));
+      const totalPrincipal = list.reduce((acc: number, i: any) => acc + Number(i.principal || 0), 0);
+      const totalProfit = list.reduce((acc: number, i: any) => acc + Number(i.profit_amount || 0), 0);
+      const totalPayout = list.reduce((acc: number, i: any) => acc + Number(i.maturity_amount || 0), 0);
+      summary = {
+        total_records: list.length,
+        total_principal_repaid: fmt(totalPrincipal),
+        total_profit_paid: fmt(totalProfit),
+        total_payout_volume: fmt(totalPayout),
+      };
+      rows = list;
+    } else if (dataset === "withdrawals") {
+      const allWithdr = await supabaseDb.getAllWithdrawals();
+      let list = allWithdr.map((w: any) => ({
         id: w.id,
         user_id: w.user_id,
-        user_name: u.name,
-        user_email: u.email,
+        user_name: w.user_name || "Investor",
+        user_email: w.user_email || "",
         network: w.network,
         amount: fmt(w.amount),
         fee: fmt(w.fee),
@@ -7530,90 +5651,81 @@ api.get("/admin/reports/:dataset", adminMiddleware, (req, res) => {
         tx_hash: w.tx_hash || "—",
         created_at: w.created_at,
         reviewed_at: w.reviewed_at || "—",
+      }));
+      if (q) {
+        list = list.filter(
+          (w: any) =>
+            w.id.toLowerCase().includes(q) ||
+            w.to_address.toLowerCase().includes(q) ||
+            w.tx_hash.toLowerCase().includes(q) ||
+            w.user_name.toLowerCase().includes(q) ||
+            w.user_email.toLowerCase().includes(q) ||
+            w.network.toLowerCase().includes(q)
+        );
+      }
+      if (statusFilter && statusFilter !== "all") {
+        list = list.filter((w: any) => w.status.toLowerCase() === statusFilter);
+      }
+      list = list.filter((w: any) => isDateInRange(w.created_at));
+      const totalAmt = list.reduce((acc: number, w: any) => acc + Number(w.amount || 0), 0);
+      const completedAmt = list
+        .filter((w: any) => w.status === "completed" || w.status === "approved")
+        .reduce((acc: number, w: any) => acc + Number(w.amount || 0), 0);
+      summary = {
+        total_records: list.length,
+        total_volume: fmt(totalAmt),
+        completed_volume: fmt(completedAmt),
+        pending_count: list.filter((w: any) => w.status === "pending").length,
+        processing_count: list.filter((w: any) => w.status === "processing").length,
+        completed_count: list.filter((w: any) => w.status === "completed").length,
+        rejected_count: list.filter((w: any) => w.status === "rejected").length,
       };
-    });
-
-    if (q) {
-      list = list.filter(
-        (w) =>
-          w.id.toLowerCase().includes(q) ||
-          w.to_address.toLowerCase().includes(q) ||
-          w.tx_hash.toLowerCase().includes(q) ||
-          w.user_name.toLowerCase().includes(q) ||
-          w.user_email.toLowerCase().includes(q) ||
-          w.network.toLowerCase().includes(q)
-      );
-    }
-    if (statusFilter && statusFilter !== "all") {
-      list = list.filter((w) => w.status.toLowerCase() === statusFilter);
-    }
-    list = list.filter((w) => isDateInRange(w.created_at));
-
-    const totalAmt = list.reduce((acc, w) => acc + Number(w.amount || 0), 0);
-    const completedAmt = list
-      .filter((w) => w.status === "completed" || w.status === "approved")
-      .reduce((acc, w) => acc + Number(w.amount || 0), 0);
-
-    summary = {
-      total_records: list.length,
-      total_volume: fmt(totalAmt),
-      completed_volume: fmt(completedAmt),
-      pending_count: list.filter((w) => w.status === "pending").length,
-      processing_count: list.filter((w) => w.status === "processing").length,
-      completed_count: list.filter((w) => w.status === "completed").length,
-      rejected_count: list.filter((w) => w.status === "rejected").length,
-    };
-    rows = list;
-  } else if (dataset === "referral_commissions") {
-    let list = Array.from(db.referral_commissions.values()).map((c) => {
-      const referrer = getUserSafe(c.referrer_id);
-      const referee = getUserSafe(c.referee_id);
-      return {
+      rows = list;
+    } else if (dataset === "referral_commissions") {
+      const refData = await supabaseDb.getAllReferralsAdmin();
+      let list = (refData.commissions || []).map((c: any) => ({
         id: c.id,
-        referrer_id: c.referrer_id,
-        referrer_name: referrer.name,
-        referrer_email: referrer.email,
-        referee_id: c.referee_id,
-        referee_name: referee.name,
+        referrer_id: c.referrer?.id || "",
+        referrer_name: c.referrer?.name || "Referrer",
+        referrer_email: c.referrer?.email || "",
+        referee_id: c.referee?.id || "",
+        referee_name: c.referee?.name || "Referee",
+        referee_email: c.referee?.email || "",
         investment_id: c.investment_id,
         plan_key: c.plan_key,
         amount: fmt(c.amount),
         status: c.status,
         created_at: c.created_at,
+      }));
+      if (q) {
+        list = list.filter(
+          (c: any) =>
+            c.id.toLowerCase().includes(q) ||
+            c.referrer_name.toLowerCase().includes(q) ||
+            c.referrer_email.toLowerCase().includes(q) ||
+            c.referee_name.toLowerCase().includes(q) ||
+            c.plan_key.toLowerCase().includes(q)
+        );
+      }
+      if (statusFilter && statusFilter !== "all") {
+        list = list.filter((c: any) => c.status.toLowerCase() === statusFilter);
+      }
+      list = list.filter((c: any) => isDateInRange(c.created_at));
+      const totalCommissions = list.reduce((acc: number, c: any) => acc + Number(c.amount || 0), 0);
+      summary = {
+        total_records: list.length,
+        total_commissions_amount: fmt(totalCommissions),
+        credited_count: list.filter((c: any) => c.status === "credited" || c.status === "paid").length,
+        pending_count: list.filter((c: any) => c.status === "pending").length,
       };
-    });
-
-    if (q) {
-      list = list.filter(
-        (c) =>
-          c.id.toLowerCase().includes(q) ||
-          c.referrer_name.toLowerCase().includes(q) ||
-          c.referrer_email.toLowerCase().includes(q) ||
-          c.referee_name.toLowerCase().includes(q) ||
-          c.plan_key.toLowerCase().includes(q)
-      );
-    }
-    if (statusFilter && statusFilter !== "all") {
-      list = list.filter((c) => c.status.toLowerCase() === statusFilter);
-    }
-    list = list.filter((c) => isDateInRange(c.created_at));
-
-    const totalCommissions = list.reduce((acc, c) => acc + Number(c.amount || 0), 0);
-    summary = {
-      total_records: list.length,
-      total_commissions_amount: fmt(totalCommissions),
-      credited_count: list.filter((c) => c.status === "credited" || c.status === "paid").length,
-      pending_count: list.filter((c) => c.status === "pending").length,
-    };
-    rows = list;
-  } else if (dataset === "wallet_transactions") {
-    let list = Array.from(db.wallet_transactions.values()).map((t) => {
-      const u = getUserSafe(t.user_id);
-      return {
+      rows = list;
+    } else if (dataset === "wallet_transactions") {
+      const allTx = await supabaseDb.getAllTransactions({ limit: 5000 });
+      let list = allTx.map((t: any) => ({
         id: t.id,
         user_id: t.user_id,
-        user_name: u.name,
-        user_email: u.email,
+        user_name: t.user?.name || "Investor",
+        user_email: t.user?.email || "",
         type: t.type,
         direction: t.direction,
         amount: fmt(t.amount),
@@ -7622,84 +5734,79 @@ api.get("/admin/reports/:dataset", adminMiddleware, (req, res) => {
         note: t.note || "—",
         ref_type: t.ref_type || "—",
         created_at: t.created_at,
+      }));
+      if (q) {
+        list = list.filter(
+          (t: any) =>
+            t.id.toLowerCase().includes(q) ||
+            t.user_name.toLowerCase().includes(q) ||
+            t.user_email.toLowerCase().includes(q) ||
+            t.type.toLowerCase().includes(q) ||
+            t.note.toLowerCase().includes(q)
+        );
+      }
+      if (statusFilter && statusFilter !== "all") {
+        list = list.filter((t: any) => t.direction.toLowerCase() === statusFilter || t.type.toLowerCase() === statusFilter);
+      }
+      list = list.filter((t: any) => isDateInRange(t.created_at));
+      const totalCredit = list
+        .filter((t: any) => t.direction === "credit")
+        .reduce((acc: number, t: any) => acc + Number(t.amount || 0), 0);
+      const totalDebit = list
+        .filter((t: any) => t.direction === "debit")
+        .reduce((acc: number, t: any) => acc + Number(t.amount || 0), 0);
+      summary = {
+        total_records: list.length,
+        total_credited: fmt(totalCredit),
+        total_debited: fmt(totalDebit),
+        adjustments_count: list.filter((t: any) => t.type === "ADMIN_ADJUSTMENT").length,
       };
-    });
-
-    if (q) {
-      list = list.filter(
-        (t) =>
-          t.id.toLowerCase().includes(q) ||
-          t.user_name.toLowerCase().includes(q) ||
-          t.user_email.toLowerCase().includes(q) ||
-          t.type.toLowerCase().includes(q) ||
-          t.note.toLowerCase().includes(q)
-      );
-    }
-    if (statusFilter && statusFilter !== "all") {
-      list = list.filter((t) => t.direction.toLowerCase() === statusFilter || t.type.toLowerCase() === statusFilter);
-    }
-    list = list.filter((t) => isDateInRange(t.created_at));
-
-    const totalCredit = list
-      .filter((t) => t.direction === "credit")
-      .reduce((acc, t) => acc + Number(t.amount || 0), 0);
-    const totalDebit = list
-      .filter((t) => t.direction === "debit")
-      .reduce((acc, t) => acc + Number(t.amount || 0), 0);
-
-    summary = {
-      total_records: list.length,
-      total_credited: fmt(totalCredit),
-      total_debited: fmt(totalDebit),
-      adjustments_count: list.filter((t) => t.type === "ADMIN_ADJUSTMENT").length,
-    };
-    rows = list;
-  } else if (dataset === "kyc") {
-    let list = Array.from(db.kyc_records.values()).map((k) => {
-      const u = getUserSafe(k.user_id);
-      const maskedId = k.id_number ? String(k.id_number).replace(/.(?=.{4})/g, "*") : "—";
-      return {
+      rows = list;
+    } else if (dataset === "kyc") {
+      const allKyc = await supabaseDb.getAllKyc();
+      let list = allKyc.map((k: any) => ({
         id: k.id,
         user_id: k.user_id,
-        user_name: u.name,
-        user_email: u.email,
+        user_name: k.user_name || "Investor",
+        user_email: k.user_email || "",
         status: k.status,
         id_type: k.id_type || "national_id",
-        first_name: k.first_name || u.name,
+        first_name: k.first_name || k.user_name,
         last_name: k.last_name || "",
         country: k.country || "IN",
-        id_number_masked: maskedId,
+        id_number_masked: k.id_number_masked || "—",
         address: k.address || "—",
         rejection_reason: k.rejection_reason || "—",
         submitted_at: k.submitted_at || k.created_at || "—",
         reviewed_at: k.reviewed_at || "—",
+      }));
+      if (q) {
+        list = list.filter(
+          (k: any) =>
+            k.id.toLowerCase().includes(q) ||
+            k.user_name.toLowerCase().includes(q) ||
+            k.user_email.toLowerCase().includes(q) ||
+            k.id_type.toLowerCase().includes(q) ||
+            k.country.toLowerCase().includes(q)
+        );
+      }
+      if (statusFilter && statusFilter !== "all") {
+        list = list.filter((k: any) => k.status.toLowerCase() === statusFilter);
+      }
+      list = list.filter((k: any) => isDateInRange(k.submitted_at));
+      summary = {
+        total_records: list.length,
+        pending_count: list.filter((k: any) => k.status === "pending").length,
+        approved_count: list.filter((k: any) => k.status === "approved").length,
+        rejected_count: list.filter((k: any) => k.status === "rejected").length,
       };
-    });
-
-    if (q) {
-      list = list.filter(
-        (k) =>
-          k.id.toLowerCase().includes(q) ||
-          k.user_name.toLowerCase().includes(q) ||
-          k.user_email.toLowerCase().includes(q) ||
-          k.id_type.toLowerCase().includes(q) ||
-          k.country.toLowerCase().includes(q)
-      );
+      rows = list;
+    } else {
+      return res.status(404).json({ detail: `Unknown dataset '${dataset}'.` });
     }
-    if (statusFilter && statusFilter !== "all") {
-      list = list.filter((k) => k.status.toLowerCase() === statusFilter);
-    }
-    list = list.filter((k) => isDateInRange(k.submitted_at));
-
-    summary = {
-      total_records: list.length,
-      pending_count: list.filter((k) => k.status === "pending").length,
-      approved_count: list.filter((k) => k.status === "approved").length,
-      rejected_count: list.filter((k) => k.status === "rejected").length,
-    };
-    rows = list;
-  } else {
-    return res.status(404).json({ detail: `Unknown dataset '${dataset}'.` });
+  } catch (err: any) {
+    console.error(`[Admin Reports] Error fetching dataset ${dataset}:`, err?.message);
+    return res.status(503).json({ detail: "Failed to generate report from authoritative database." });
   }
 
   // Handle JSON response
@@ -8245,13 +6352,13 @@ api.put("/admin/reminders/workflows/:key", adminMiddleware, (req, res) => {
 });
 
 // 4. Get System Analytics & Performance Funnel
-api.get("/admin/reminders/analytics", adminMiddleware, (_req, res) => {
-  const analytics = reminderEngine.getAnalytics();
+api.get("/admin/reminders/analytics", adminMiddleware, async (_req, res) => {
+  const analytics = await reminderEngine.getAnalytics();
   res.json(analytics);
 });
 
 // 5. Get Reminder Logs with Filters & Pagination
-api.get("/admin/reminders/logs", adminMiddleware, (req, res) => {
+api.get("/admin/reminders/logs", adminMiddleware, async (req, res) => {
   const workflow = req.query.workflow as string | undefined;
   const status = req.query.status as string | undefined;
   const page = Math.max(1, Number(req.query.page || 1));
@@ -8270,16 +6377,26 @@ api.get("/admin/reminders/logs", adminMiddleware, (req, res) => {
 
   const total = list.length;
   const startIndex = (page - 1) * limit;
-  const paginated = list.slice(startIndex, startIndex + limit).map((log) => {
-    const u = db.users.get(log.user_id);
-    return {
-      ...log,
-      user: {
-        name: u?.name || "Unknown User",
-        email: u?.email || "N/A",
-      },
-    };
-  });
+  const paginated = await Promise.all(
+    list.slice(startIndex, startIndex + limit).map(async (log) => {
+      let userName = "User";
+      let userEmail = "N/A";
+      try {
+        const p = await supabaseDb.getProfileById(log.user_id);
+        if (p) {
+          userName = p.name || userName;
+          userEmail = p.email || userEmail;
+        }
+      } catch {}
+      return {
+        ...log,
+        user: {
+          name: userName,
+          email: userEmail,
+        },
+      };
+    })
+  );
 
   res.json({
     total,
@@ -8309,7 +6426,16 @@ api.post("/admin/reminders/test", adminMiddleware, async (req, res) => {
   const admin = (req as any).user;
   const { user_id, workflow_key, step_index } = req.body;
 
-  const targetUser = user_id ? db.users.get(user_id) : admin;
+  let targetUser = admin;
+  if (user_id) {
+    try {
+      const p = await supabaseDb.getProfileById(user_id);
+      if (p) targetUser = supabaseDb.formatProfile(p);
+      else targetUser = null;
+    } catch {
+      targetUser = null;
+    }
+  }
   if (!targetUser) {
     return res.status(404).json({ detail: "Target user not found." });
   }
@@ -8365,9 +6491,9 @@ api.post("/admin/reminders/test", adminMiddleware, async (req, res) => {
 // ==================== UNIFIED NOTIFICATION MANAGEMENT ROUTES ====================
 
 // 1. Get Audience Segments with Live Counts
-api.get("/admin/notifications/segments", adminMiddleware, (req, res) => {
+api.get("/admin/notifications/segments", adminMiddleware, async (req, res) => {
   try {
-    const segments = notificationManager.getSegmentsWithCounts();
+    const segments = await notificationManager.getSegmentsWithCounts();
     res.json({ segments });
   } catch (err: any) {
     console.error("[NotificationManager] Get segments error:", err);
@@ -8376,13 +6502,13 @@ api.get("/admin/notifications/segments", adminMiddleware, (req, res) => {
 });
 
 // 2. Preview Users in a Segment
-api.post("/admin/notifications/segments/preview", adminMiddleware, (req, res) => {
+api.post("/admin/notifications/segments/preview", adminMiddleware, async (req, res) => {
   try {
     const { segment_id } = req.body;
     if (!segment_id) {
       return res.status(400).json({ detail: "segment_id is required." });
     }
-    const matching = notificationManager.evaluateSegmentUsers(segment_id);
+    const matching = await notificationManager.evaluateSegmentUsers(segment_id);
     const safeUsers = matching.slice(0, 100).map((u: any) => ({
       id: u.id,
       name: u.name || "Unknown",
@@ -8621,7 +6747,7 @@ api.post("/admin/support/attachments/upload", adminMiddleware, upload.array("fil
 api.post("/admin/support/attachment/upload", adminMiddleware, upload.single("file") as any, handleAttachmentUpload as any);
 
 // Retrieve attachment (secure authenticated access)
-const handleAttachmentServe = (req: Request, res: Response) => {
+const handleAttachmentServe = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const attachment = db.support_attachments.get(id);
@@ -8646,7 +6772,8 @@ const handleAttachmentServe = (req: Request, res: Response) => {
       const payload = jwt.verify(token, JWT_SECRET) as any;
       const userId = payload?.sub || payload?.id;
       if (userId) {
-        authUser = db.users.get(userId);
+        const p = await supabaseDb.getProfileById(userId);
+        if (p) authUser = supabaseDb.formatProfile(p);
       }
     } catch {
       return res.status(401).json({ detail: "Invalid or expired authentication token." });
@@ -9144,7 +7271,7 @@ api.get("/admin/support/tickets", adminMiddleware, (req, res) => {
 });
 
 // 2. Admin: View single ticket with thread, timeline, and user profile
-api.get("/admin/support/tickets/:id", adminMiddleware, (req, res) => {
+api.get("/admin/support/tickets/:id", adminMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
     const ticket = supportManager.getTicket(id);
@@ -9156,7 +7283,11 @@ api.get("/admin/support/tickets/:id", adminMiddleware, (req, res) => {
     const enriched = supportManager.enrichTicketWithSla(ticket);
     const messages = supportManager.getTicketMessages(id, true);
     const timeline = supportManager.getTicketTimeline(id, true);
-    const user = cleanUser(db.users.get(ticket.user_id));
+    let user: any = null;
+    try {
+      const p = await supabaseDb.getProfileById(ticket.user_id);
+      if (p) user = cleanUser(supabaseDb.formatProfile(p));
+    } catch {}
 
     res.json({
       ok: true,
@@ -9273,7 +7404,7 @@ api.patch("/admin/support/tickets/:id/status", adminMiddleware, handleAdminStatu
 api.put("/admin/support/tickets/:id/status", adminMiddleware, handleAdminStatusUpdate);
 
 // 6. Admin: Assign ticket
-const handleAdminAssign = (req: Request, res: Response) => {
+const handleAdminAssign = async (req: Request, res: Response) => {
   try {
     const authAdmin = (req as any).user;
     const { id } = req.params;
@@ -9283,8 +7414,12 @@ const handleAdminAssign = (req: Request, res: Response) => {
     let targetAdminId: string | null = null;
 
     if (admin_id) {
-      const targetAdmin = db.users.get(admin_id);
-      if (!targetAdmin || targetAdmin.role !== "admin") {
+      let targetAdmin: any = null;
+      try {
+        const p = await supabaseDb.getProfileById(admin_id);
+        if (p && p.role === "admin") targetAdmin = supabaseDb.formatProfile(p);
+      } catch {}
+      if (!targetAdmin) {
         return res.status(400).json({ detail: "Invalid admin user selected for assignment." });
       }
       targetAdminName = targetAdmin.name || targetAdmin.email;

@@ -400,6 +400,47 @@ export class SupabaseDbService {
     };
   }
 
+  public async changePassword(params: {
+    userId: string;
+    email: string;
+    currentPassword: string;
+    newPassword: string;
+  }): Promise<{ success: boolean }> {
+    if (!this.isConfigured()) {
+      throw new Error("Supabase is not configured. Authoritative password update unavailable.");
+    }
+    const cleanEmail = params.email.trim().toLowerCase();
+    const rawUrl = getResolvedSupabaseUrl();
+    const anonKey = getResolvedAnonKey();
+    const { createClient } = await import("@supabase/supabase-js");
+    const client = createClient(rawUrl, anonKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+
+    // 1. Verify current password directly against Supabase Auth
+    const { error: authErr } = await client.auth.signInWithPassword({
+      email: cleanEmail,
+      password: params.currentPassword,
+    });
+    if (authErr) {
+      throw new Error("INCORRECT_CURRENT_PASSWORD");
+    }
+
+    // 2. Update password in Supabase Auth via Admin client
+    const admin = getSupabaseAdmin();
+    if (!admin) {
+      throw new Error("Supabase Admin client is unavailable.");
+    }
+    const { error: updateErr } = await admin.auth.admin.updateUserById(params.userId, {
+      password: params.newPassword,
+    });
+    if (updateErr) {
+      throw new Error(updateErr.message || "Failed to update password in Supabase Auth.");
+    }
+
+    return { success: true };
+  }
+
   public async updateProfile(userId: string, updates: Partial<any>): Promise<CleanUserProfile> {
     if (!this.isConfigured()) {
       return { id: userId, ...updates } as any;
@@ -924,6 +965,80 @@ export class SupabaseDbService {
     return data;
   }
 
+  public async updateInvestmentPlan(params: {
+    key: string;
+    name?: string;
+    price?: number | string;
+    profit_percentage?: number | string;
+    maturity_percentage?: number | string;
+    lock_days?: number;
+    is_active?: boolean;
+    adminId: string;
+    adminEmail?: string;
+  }): Promise<any> {
+    if (!isSupabaseAdminConfigured()) throw new Error("Supabase is not configured.");
+    const supabase = this.getClient();
+    const cleanKey = params.key.toLowerCase().trim();
+
+    const { data: existing, error: eErr } = await supabase
+      .from("investment_plans")
+      .select("*")
+      .eq("key", cleanKey)
+      .maybeSingle();
+
+    if (eErr || !existing) throw new Error("Plan not found in authoritative database.");
+
+    const updates: Record<string, any> = {
+      updated_at: new Date().toISOString(),
+    };
+    if (params.name !== undefined) updates.name = String(params.name).trim();
+    if (params.price !== undefined) updates.price = Number(params.price);
+    if (params.profit_percentage !== undefined) updates.profit_percentage = Number(params.profit_percentage);
+    if (params.maturity_percentage !== undefined) updates.maturity_percentage = Number(params.maturity_percentage);
+    if (params.lock_days !== undefined) updates.lock_days = Number(params.lock_days);
+    if (params.is_active !== undefined) updates.is_active = Boolean(params.is_active);
+
+    const { data: updated, error: uErr } = await supabase
+      .from("investment_plans")
+      .update(updates)
+      .eq("key", cleanKey)
+      .select()
+      .single();
+
+    if (uErr) throw new Error("Failed to update plan: " + uErr.message);
+
+    await this.logAudit({
+      adminId: params.adminId,
+      adminEmail: params.adminEmail || "admin@easyx.trade",
+      action: "plan.update",
+      targetType: "investment_plan",
+      targetId: cleanKey,
+      details: { before: existing, updates },
+    });
+
+    return updated;
+  }
+
+  public async getPlanHistory(planKey: string): Promise<any[]> {
+    if (!isSupabaseAdminConfigured()) return [];
+    const supabase = this.getClient();
+    const { data } = await supabase
+      .from("audit_logs")
+      .select("*")
+      .eq("target_type", "investment_plan")
+      .eq("target_id", planKey.toLowerCase().trim())
+      .order("created_at", { ascending: false });
+
+    return (data || []).map((log) => ({
+      id: log.id,
+      plan_key: log.target_id,
+      admin_id: log.admin_id,
+      admin_email: log.admin_email,
+      changes: log.details,
+      created_at: log.created_at,
+    }));
+  }
+
   public async getPlansState(userId: string): Promise<any[]> {
     if (!isSupabaseAdminConfigured()) return [];
     const plans = await this.getInvestmentPlans();
@@ -1190,16 +1305,21 @@ export class SupabaseDbService {
     return data.map((inv) => this.serializeInvestment(inv));
   }
 
-  public async getAllInvestments(): Promise<any[]> {
+  public async getAllInvestments(options?: { status?: string; query?: string }): Promise<any[]> {
     if (!isSupabaseAdminConfigured()) return [];
     const supabase = this.getClient();
-    const { data, error } = await supabase
+    let query = supabase
       .from("investments")
       .select("*, profiles:user_id(name, email)")
       .order("created_at", { ascending: false });
 
+    if (options?.status && options.status !== "all") {
+      query = query.eq("status", options.status.toLowerCase());
+    }
+
+    const { data, error } = await query;
     if (error || !data) return [];
-    return data.map((inv) => {
+    let results = data.map((inv) => {
       const uName = (inv as any).profiles?.name || "Investor";
       const uEmail = (inv as any).profiles?.email || "";
       return {
@@ -1209,6 +1329,19 @@ export class SupabaseDbService {
         user: { name: uName, email: uEmail },
       };
     });
+
+    if (options?.query) {
+      const q = options.query.trim().toLowerCase();
+      results = results.filter(
+        (i: any) =>
+          i.id.toLowerCase().includes(q) ||
+          (i.plan_key && i.plan_key.toLowerCase().includes(q)) ||
+          (i.user_name && i.user_name.toLowerCase().includes(q)) ||
+          (i.user_email && i.user_email.toLowerCase().includes(q))
+      );
+    }
+
+    return results;
   }
 
   public async getInvestmentById(id: string): Promise<any | null> {
@@ -2939,6 +3072,152 @@ export class SupabaseDbService {
     return this.serializeKyc(updatedKyc);
   }
 
+  public async updateKycAdminDetails(params: {
+    kycIdOrUserId: string;
+    name?: string;
+    id_type?: string;
+    id_number?: string;
+    address?: string;
+    permanent_address?: string;
+    status?: string;
+    admin_note?: string;
+    adminId: string;
+    adminEmail?: string;
+  }): Promise<any> {
+    if (!isSupabaseAdminConfigured()) throw new Error("Supabase is not configured.");
+    const supabase = this.getClient();
+    const idToLookup = params.kycIdOrUserId;
+
+    let { data: kyc } = await supabase
+      .from("kyc_records")
+      .select("*")
+      .or(`id.eq.${idToLookup},user_id.eq.${idToLookup}`)
+      .limit(1)
+      .maybeSingle();
+
+    const targetUserId = kyc?.user_id || (isUuid(idToLookup) ? idToLookup : null);
+    if (!targetUserId) throw new Error("User or KYC record not found.");
+
+    const nowStr = new Date().toISOString();
+    const changes: Record<string, any> = {};
+
+    const profileUpdates: Record<string, any> = { updated_at: nowStr };
+    if (params.name && params.name.trim()) {
+      profileUpdates.name = params.name.trim();
+      changes.name = params.name.trim();
+    }
+    const targetAddr = params.permanent_address || params.address;
+    if (targetAddr && targetAddr.trim()) {
+      profileUpdates.address = targetAddr.trim();
+      profileUpdates.permanent_address = targetAddr.trim();
+      changes.address = targetAddr.trim();
+    }
+    if (params.status) {
+      profileUpdates.kyc_status = params.status;
+      changes.status = params.status;
+    }
+
+    await supabase.from("profiles").update(profileUpdates).eq("id", targetUserId);
+
+    const kycUpdates: Record<string, any> = {
+      updated_at: nowStr,
+      admin_note: params.admin_note || null,
+      decided_by: params.adminId && params.adminId.length === 36 ? params.adminId : null,
+    };
+    if (params.status) {
+      kycUpdates.status = params.status;
+      if (params.status === "approved") {
+        kycUpdates.decided_at = nowStr;
+      }
+    }
+    if (params.id_type) {
+      kycUpdates.id_type = params.id_type.toLowerCase();
+      changes.id_type = params.id_type.toLowerCase();
+    }
+    if (params.id_number && params.id_number.trim()) {
+      kycUpdates.id_number = params.id_number.trim();
+      changes.id_number = params.id_number.trim();
+    }
+    if (targetAddr) {
+      kycUpdates.address = targetAddr.trim();
+    }
+
+    let savedKyc: any;
+    if (kyc) {
+      const { data } = await supabase.from("kyc_records").update(kycUpdates).eq("id", kyc.id).select().single();
+      savedKyc = data;
+    } else {
+      const { data } = await supabase.from("kyc_records").insert({
+        user_id: targetUserId,
+        ...kycUpdates,
+        status: params.status || "approved",
+        submitted_at: nowStr,
+        created_at: nowStr,
+      }).select().single();
+      savedKyc = data;
+    }
+
+    await this.logAudit({
+      adminId: params.adminId,
+      adminEmail: params.adminEmail || "admin@easyx.trade",
+      action: "kyc.admin_update",
+      targetType: "kyc_record",
+      targetId: savedKyc?.id || targetUserId,
+      details: { changes, note: params.admin_note },
+    });
+
+    const { data: updatedProfile } = await supabase.from("profiles").select("*").eq("id", targetUserId).single();
+
+    return {
+      ok: true,
+      record: savedKyc ? this.serializeKyc(savedKyc) : null,
+      user: updatedProfile ? this.serializeUser(updatedProfile) : null,
+      changes,
+    };
+  }
+
+  public async setKycStatus(params: {
+    kycIdOrUserId: string;
+    status: string;
+    adminId: string;
+    adminEmail?: string;
+  }): Promise<any> {
+    if (!isSupabaseAdminConfigured()) return null;
+    const supabase = this.getClient();
+    const idToLookup = params.kycIdOrUserId;
+
+    const { data: kyc } = await supabase
+      .from("kyc_records")
+      .select("*")
+      .or(`id.eq.${idToLookup},user_id.eq.${idToLookup}`)
+      .limit(1)
+      .maybeSingle();
+
+    if (!kyc) throw new Error("KYC record not found: " + idToLookup);
+    const nowStr = new Date().toISOString();
+
+    await supabase
+      .from("kyc_records")
+      .update({
+        status: params.status,
+        reject_reason: null,
+        decided_by: null,
+        decided_at: null,
+        updated_at: nowStr,
+      })
+      .eq("id", kyc.id);
+
+    await supabase
+      .from("profiles")
+      .update({
+        kyc_status: params.status,
+        updated_at: nowStr,
+      })
+      .eq("id", kyc.user_id);
+
+    return true;
+  }
+
   /* -------------------------------------------------------------------------- */
   /*                                 REFERRALS                                  */
   /* -------------------------------------------------------------------------- */
@@ -3128,8 +3407,9 @@ export class SupabaseDbService {
   public async createNotification(params: {
     userId: string;
     title: string;
-    body: string;
-    type?: "investment" | "deposit" | "withdrawal" | "kyc" | "security" | "referral" | "system";
+    body?: string;
+    message?: string;
+    type?: string;
     channel?: "in_app" | "push" | "both";
     actionUrl?: string;
     actionText?: string;
@@ -3137,12 +3417,13 @@ export class SupabaseDbService {
   }): Promise<any> {
     if (!isSupabaseAdminConfigured()) return null;
     const supabase = this.getClient();
+    const bodyContent = params.body || params.message || params.title;
     const { data, error } = await supabase
       .from("notifications")
       .insert({
         user_id: params.userId,
         title: params.title,
-        body: params.body,
+        body: bodyContent,
         type: params.type || "system",
         channel: params.channel || "both",
         action_url: params.actionUrl || null,
@@ -3188,10 +3469,13 @@ export class SupabaseDbService {
     adminId?: string;
     adminEmail: string;
     action: string;
-    entityType: string;
-    entityId: string;
+    entityType?: string;
+    entityId?: string;
+    targetType?: string;
+    targetId?: string;
     amount?: number;
     reason?: string;
+    details?: any;
     meta?: any;
   }): Promise<void> {
     if (!isSupabaseAdminConfigured()) return;
@@ -3201,16 +3485,37 @@ export class SupabaseDbService {
         admin_id: params.adminId && params.adminId.length === 36 ? params.adminId : null,
         admin_email: params.adminEmail,
         action: params.action,
-        entity_type: params.entityType,
-        entity_id: params.entityId,
+        entity_type: params.entityType || params.targetType || "system",
+        entity_id: params.entityId || params.targetId || "unknown",
         amount: params.amount != null ? Number(params.amount) : null,
         reason: params.reason || null,
-        meta: params.meta || {},
+        meta: params.meta || params.details || {},
         created_at: new Date().toISOString(),
       });
     } catch (err: any) {
       console.warn("[SupabaseDb] Audit log notice:", err.message);
     }
+  }
+
+  public serializeUser(u: any): CleanUserProfile {
+    return this.formatProfile(u);
+  }
+
+  public serializeTransaction(t: any): any {
+    return {
+      id: t.id,
+      user_id: t.user_id,
+      type: t.type,
+      direction: t.direction,
+      amount: fmt(t.amount),
+      balance_after: fmt(t.balance_after),
+      ref_type: t.ref_type,
+      ref_id: t.ref_id,
+      status: t.status,
+      note: t.note,
+      description: t.note,
+      created_at: t.created_at,
+    };
   }
 
   public async getAuditLogs(limit: number = 100): Promise<any[]> {
@@ -3578,6 +3883,585 @@ export class SupabaseDbService {
         total_referred: directReferrals,
         commission_earned: fmt(commsEarned),
       },
+    };
+  }
+
+  public async adminAdjustWallet(params: {
+    userId: string;
+    amount: number;
+    direction: "credit" | "debit";
+    adminId: string;
+    adminEmail?: string;
+    reason: string;
+    idempotencyKey?: string;
+  }): Promise<any> {
+    if (!isSupabaseAdminConfigured()) throw new Error("Supabase is not configured.");
+    const supabase = this.getClient();
+
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("id, name, email")
+      .eq("id", params.userId)
+      .single();
+
+    if (!profile) {
+      throw new Error("Target user not found in authoritative database.");
+    }
+
+    const amt = Math.abs(Number(params.amount));
+    if (isNaN(amt) || amt <= 0) {
+      throw new Error("Adjustment amount must be greater than 0.");
+    }
+
+    const currentWallet = await this.getWallet(params.userId);
+    const curBal = Number(currentWallet?.available_balance || 0);
+
+    if (params.direction === "debit" && curBal < amt) {
+      const err: any = new Error(`Insufficient balance. User only has $${fmt(curBal)} USDT available, cannot debit $${fmt(amt)} USDT.`);
+      err.status = 422;
+      err.current_balance = fmt(curBal);
+      err.requested_debit = fmt(amt);
+      throw err;
+    }
+
+    const finalIdempotencyKey = params.idempotencyKey || `admin_adj_${params.userId}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+    let updatedWallet: any;
+    if (params.direction === "credit") {
+      updatedWallet = await this.creditWallet({
+        userId: params.userId,
+        amount: amt,
+        type: "ADMIN_ADJUSTMENT",
+        refType: "admin_adjustment",
+        refId: params.adminId && params.adminId.length === 36 ? params.adminId : undefined,
+        createdBy: params.adminId && params.adminId.length === 36 ? params.adminId : undefined,
+        idempotencyKey: finalIdempotencyKey,
+        note: params.reason,
+      });
+    } else {
+      updatedWallet = await this.debitWallet({
+        userId: params.userId,
+        amount: amt,
+        type: "ADMIN_ADJUSTMENT",
+        refType: "admin_adjustment",
+        refId: params.adminId && params.adminId.length === 36 ? params.adminId : undefined,
+        createdBy: params.adminId && params.adminId.length === 36 ? params.adminId : undefined,
+        idempotencyKey: finalIdempotencyKey,
+        note: params.reason,
+      });
+    }
+
+    // Fetch the created transaction record
+    const { data: tx } = await supabase
+      .from("wallet_transactions")
+      .select("*")
+      .eq("user_id", params.userId)
+      .eq("idempotency_key", finalIdempotencyKey)
+      .maybeSingle();
+
+    // Insert audit log
+    await this.logAudit({
+      action: "wallet.adjust",
+      adminId: params.adminId,
+      adminEmail: params.adminEmail,
+      targetType: "wallet",
+      targetId: updatedWallet?.id || params.userId,
+      details: {
+        user_id: params.userId,
+        user_email: profile.email,
+        direction: params.direction,
+        amount: fmt(amt),
+        previous_balance: fmt(curBal),
+        balance_after: updatedWallet?.available_balance,
+        reason: params.reason,
+        ledger_tx_id: tx?.id,
+        idempotency_key: finalIdempotencyKey,
+      },
+    });
+
+    // Create notification in Supabase
+    await this.createNotification({
+      userId: params.userId,
+      type: "wallet_adjustment",
+      title: `Wallet ${params.direction === "credit" ? "Credited" : "Debited"} ($${fmt(amt)} USDT)`,
+      message: `An administrator has ${params.direction === "credit" ? "credited" : "debited"} $${fmt(amt)} USDT to your wallet. Reason: ${params.reason}. Balance: $${updatedWallet?.available_balance} USDT.`,
+      actionUrl: "/wallet",
+      actionText: "View Wallet",
+    });
+
+    return {
+      ok: true,
+      transaction: tx ? this.serializeTransaction(tx) : {
+        id: finalIdempotencyKey,
+        type: "ADMIN_ADJUSTMENT",
+        direction: params.direction,
+        amount: fmt(amt),
+        balance_after: updatedWallet?.available_balance,
+        note: params.reason,
+        created_at: new Date().toISOString(),
+      },
+      user: { id: profile.id, name: profile.name, email: profile.email },
+      wallet: { available_balance: updatedWallet?.available_balance },
+    };
+  }
+
+  public async suspendUser(params: {
+    userId: string;
+    adminId: string;
+    adminEmail?: string;
+    reason?: string;
+  }): Promise<any> {
+    if (!isSupabaseAdminConfigured()) throw new Error("Supabase is not configured.");
+    const supabase = this.getClient();
+    const profile = await this.getProfileById(params.userId);
+    if (!profile) throw new Error("User not found.");
+    if (profile.role === "admin") throw new Error("Admin accounts cannot be suspended.");
+
+    const nowStr = new Date().toISOString();
+    const reasonText = params.reason || "Administrative suspension";
+
+    const { data: updated, error } = await supabase
+      .from("profiles")
+      .update({
+        status: "suspended",
+        suspended_at: nowStr,
+        suspended_reason: reasonText,
+        suspended_by: params.adminId,
+        updated_at: nowStr,
+      })
+      .eq("id", params.userId)
+      .select()
+      .single();
+
+    if (error) throw new Error("Failed to suspend user: " + error.message);
+
+    await this.logAudit({
+      action: "user.suspend",
+      adminId: params.adminId,
+      adminEmail: params.adminEmail || "admin@easyx.trade",
+      targetType: "user",
+      targetId: params.userId,
+      details: { reason: reasonText },
+    });
+
+    await this.createNotification({
+      userId: params.userId,
+      type: "account_suspended",
+      title: "Account suspended",
+      message: "Your account has been suspended. Existing investments continue toward maturity. Contact support for details.",
+    });
+
+    return this.formatProfile(updated);
+  }
+
+  public async unsuspendUser(params: {
+    userId: string;
+    adminId: string;
+    adminEmail?: string;
+  }): Promise<any> {
+    if (!isSupabaseAdminConfigured()) throw new Error("Supabase is not configured.");
+    const supabase = this.getClient();
+    const profile = await this.getProfileById(params.userId);
+    if (!profile) throw new Error("User not found.");
+
+    const nowStr = new Date().toISOString();
+
+    const { data: updated, error } = await supabase
+      .from("profiles")
+      .update({
+        status: "active",
+        suspended_at: null,
+        suspended_reason: null,
+        suspended_by: null,
+        updated_at: nowStr,
+      })
+      .eq("id", params.userId)
+      .select()
+      .single();
+
+    if (error) throw new Error("Failed to unsuspend user: " + error.message);
+
+    await this.logAudit({
+      action: "user.unsuspend",
+      adminId: params.adminId,
+      adminEmail: params.adminEmail || "admin@easyx.trade",
+      targetType: "user",
+      targetId: params.userId,
+      details: {},
+    });
+
+    await this.createNotification({
+      userId: params.userId,
+      type: "account_reactivated",
+      title: "Account reactivated",
+      message: "Your account has been reactivated. Welcome back!",
+    });
+
+    return this.formatProfile(updated);
+  }
+
+  public async batchSetUserStatus(params: {
+    ids: string[];
+    status: string;
+    reason?: string;
+    adminId: string;
+    adminEmail?: string;
+  }): Promise<{ success: boolean; count: number; status: string; updated: any[]; errors: any[] }> {
+    if (!isSupabaseAdminConfigured()) throw new Error("Supabase is not configured.");
+    const updated: any[] = [];
+    const errors: any[] = [];
+
+    for (const id of params.ids) {
+      try {
+        const profile = await this.getProfileById(id);
+        if (!profile) {
+          errors.push({ id, error: "User not found" });
+          continue;
+        }
+        if (profile.role === "admin") {
+          errors.push({ id, error: "Cannot modify admin user" });
+          continue;
+        }
+
+        if (params.status === "suspended") {
+          const res = await this.suspendUser({
+            userId: id,
+            adminId: params.adminId,
+            adminEmail: params.adminEmail,
+            reason: params.reason || "Batch suspended by administrator",
+          });
+          updated.push(res);
+        } else if (params.status === "active") {
+          const res = await this.unsuspendUser({
+            userId: id,
+            adminId: params.adminId,
+            adminEmail: params.adminEmail,
+          });
+          updated.push(res);
+        } else if (params.status === "kyc_approved") {
+          await this.adminReviewKyc({
+            kycIdOrUserId: id,
+            adminId: params.adminId,
+            adminEmail: params.adminEmail,
+            decision: "approve",
+          });
+          const prof = await this.getProfileById(id);
+          updated.push(prof);
+        } else if (params.status === "kyc_rejected") {
+          await this.adminReviewKyc({
+            kycIdOrUserId: id,
+            adminId: params.adminId,
+            adminEmail: params.adminEmail,
+            decision: "reject",
+            rejectReason: params.reason || "Rejected by administrator",
+          });
+          const prof = await this.getProfileById(id);
+          updated.push(prof);
+        }
+      } catch (err: any) {
+        errors.push({ id, error: err?.message || "Failed to update user" });
+      }
+    }
+
+    return { success: true, count: updated.length, status: params.status, updated, errors };
+  }
+
+  public async backdateInvestment(id: string, secondsAgo: number = 1): Promise<any> {
+    if (!isSupabaseAdminConfigured()) throw new Error("Supabase is not configured.");
+    const supabase = this.getClient();
+    const newMaturity = new Date(Date.now() - secondsAgo * 1000).toISOString();
+    const { data, error } = await supabase
+      .from("investments")
+      .update({ maturity_at: newMaturity, updated_at: new Date().toISOString() })
+      .eq("id", id)
+      .select()
+      .single();
+    if (error) throw new Error("Failed to backdate investment: " + error.message);
+    return data;
+  }
+
+  public async getAdminTrends(period: string = "30d"): Promise<any> {
+    if (!isSupabaseAdminConfigured()) throw new Error("Supabase is not configured.");
+    const supabase = this.getClient();
+    const now = new Date();
+
+    let daysCount = 30;
+    let isMonthly = false;
+    if (period === "7d") daysCount = 7;
+    else if (period === "30d") daysCount = 30;
+    else if (period === "90d") daysCount = 90;
+    else if (period === "1y") { daysCount = 365; isMonthly = true; }
+    else if (period === "all") { daysCount = 180; isMonthly = true; }
+
+    const [
+      { data: profiles, error: pErr },
+      { data: deposits, error: dErr },
+      { data: investments, error: iErr },
+    ] = await Promise.all([
+      supabase.from("profiles").select("id, role, status, kyc_status, created_at").neq("role", "admin"),
+      supabase.from("payment_deposits").select("id, user_id, amount, approved_amount, status, network, created_at"),
+      supabase.from("investments").select("id, plan_key, principal, status, created_at"),
+    ]);
+
+    if (pErr) throw new Error("Failed to fetch profiles: " + pErr.message);
+    if (dErr) throw new Error("Failed to fetch deposits: " + dErr.message);
+    if (iErr) throw new Error("Failed to fetch investments: " + iErr.message);
+
+    const nonAdminUsers = profiles || [];
+    const allDeposits = deposits || [];
+    const allInvestments = investments || [];
+
+    interface BucketData {
+      date: string;
+      formatted_date: string;
+      full_date: string;
+      rawDate: Date;
+      new_users: number;
+      cumulative_users: number;
+      active_users: number;
+      kyc_verified: number;
+      approved_deposits: number;
+      pending_deposits: number;
+      rejected_deposits: number;
+      total_deposits: number;
+      cumulative_deposits: number;
+      deposit_count: number;
+      avg_deposit: number;
+    }
+
+    const buckets: BucketData[] = [];
+    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+    if (isMonthly) {
+      for (let i = 11; i >= 0; i--) {
+        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+        buckets.push({
+          date: key,
+          formatted_date: `${monthNames[d.getMonth()]} ${String(d.getFullYear()).slice(2)}`,
+          full_date: `${monthNames[d.getMonth()]} ${d.getFullYear()}`,
+          rawDate: d,
+          new_users: 0,
+          cumulative_users: 0,
+          active_users: 0,
+          kyc_verified: 0,
+          approved_deposits: 0,
+          pending_deposits: 0,
+          rejected_deposits: 0,
+          total_deposits: 0,
+          cumulative_deposits: 0,
+          deposit_count: 0,
+          avg_deposit: 0,
+        });
+      }
+    } else {
+      for (let i = daysCount - 1; i >= 0; i--) {
+        const d = new Date(now.getTime() - i * 86400000);
+        const key = d.toISOString().slice(0, 10);
+        const day = d.getDate();
+        const month = monthNames[d.getMonth()];
+        buckets.push({
+          date: key,
+          formatted_date: `${day} ${month}`,
+          full_date: `${day} ${month} ${d.getFullYear()}`,
+          rawDate: d,
+          new_users: 0,
+          cumulative_users: 0,
+          active_users: 0,
+          kyc_verified: 0,
+          approved_deposits: 0,
+          pending_deposits: 0,
+          rejected_deposits: 0,
+          total_deposits: 0,
+          cumulative_deposits: 0,
+          deposit_count: 0,
+          avg_deposit: 0,
+        });
+      }
+    }
+
+    for (const user of nonAdminUsers) {
+      if (!user.created_at) continue;
+      const uDate = new Date(user.created_at);
+      const dateKey = isMonthly
+        ? `${uDate.getFullYear()}-${String(uDate.getMonth() + 1).padStart(2, "0")}`
+        : user.created_at.slice(0, 10);
+
+      const bucket = buckets.find((b) => b.date === dateKey);
+      if (bucket) {
+        bucket.new_users += 1;
+        if (user.kyc_status === "approved") bucket.kyc_verified += 1;
+        if (user.status === "active") bucket.active_users += 1;
+      }
+    }
+
+    for (const dep of allDeposits) {
+      if (!dep.created_at) continue;
+      const dDate = new Date(dep.created_at);
+      const dateKey = isMonthly
+        ? `${dDate.getFullYear()}-${String(dDate.getMonth() + 1).padStart(2, "0")}`
+        : dep.created_at.slice(0, 10);
+
+      const bucket = buckets.find((b) => b.date === dateKey);
+      if (bucket) {
+        const amt = Number(dep.amount || 0);
+        const appAmt = Number(dep.approved_amount || dep.amount || 0);
+        bucket.total_deposits += amt;
+
+        if (dep.status === "approved") {
+          bucket.approved_deposits += appAmt;
+          bucket.deposit_count += 1;
+        } else if (dep.status === "pending") {
+          bucket.pending_deposits += amt;
+        } else if (dep.status === "rejected") {
+          bucket.rejected_deposits += amt;
+        }
+      }
+    }
+
+    let runningUsers = 0;
+    let runningDeposits = 0;
+    const firstBucketStart = buckets[0]?.rawDate || new Date(0);
+    const priorUsers = nonAdminUsers.filter((u) => u.created_at && new Date(u.created_at) < firstBucketStart).length;
+    const priorApprovedDeposits = allDeposits
+      .filter((d) => d.status === "approved" && d.created_at && new Date(d.created_at) < firstBucketStart)
+      .reduce((sum, d) => sum + Number(d.approved_amount || d.amount || 0), 0);
+
+    runningUsers = priorUsers;
+    runningDeposits = priorApprovedDeposits;
+
+    for (const b of buckets) {
+      runningUsers += b.new_users;
+      runningDeposits += b.approved_deposits;
+
+      b.cumulative_users = runningUsers;
+      b.cumulative_deposits = Math.round(runningDeposits * 100) / 100;
+      b.approved_deposits = Math.round(b.approved_deposits * 100) / 100;
+      b.pending_deposits = Math.round(b.pending_deposits * 100) / 100;
+      b.total_deposits = Math.round(b.total_deposits * 100) / 100;
+      b.avg_deposit = b.deposit_count > 0 ? Math.round((b.approved_deposits / b.deposit_count) * 100) / 100 : 0;
+    }
+
+    const networkMap: Record<string, { volume: number; count: number; color: string }> = {
+      TRC20: { volume: 0, count: 0, color: "#10b981" },
+      BEP20: { volume: 0, count: 0, color: "#a855f7" },
+      ERC20: { volume: 0, count: 0, color: "#0ea5e9" },
+      POLYGON: { volume: 0, count: 0, color: "#f59e0b" },
+    };
+
+    for (const dep of allDeposits) {
+      if (dep.status === "approved") {
+        const net = (dep.network || "TRC20").toUpperCase();
+        if (!networkMap[net]) {
+          networkMap[net] = { volume: 0, count: 0, color: "#ec4899" };
+        }
+        const v = Number(dep.approved_amount || dep.amount || 0);
+        networkMap[net].volume += v;
+        networkMap[net].count += 1;
+      }
+    }
+
+    const totalAppVolume = Object.values(networkMap).reduce((sum, n) => sum + n.volume, 0) || 1;
+    const network_breakdown = Object.entries(networkMap)
+      .filter(([_, data]) => data.count > 0 || data.volume > 0)
+      .map(([network, data]) => ({
+        network,
+        volume: Math.round(data.volume * 100) / 100,
+        count: data.count,
+        percentage: Math.round((data.volume / totalAppVolume) * 1000) / 10,
+        color: data.color,
+      }));
+
+    const planMap: Record<string, { name: string; volume: number; count: number; color: string }> = {
+      silver: { name: "Silver ($300)", volume: 0, count: 0, color: "#94a3b8" },
+      gold: { name: "Gold ($1,000)", volume: 0, count: 0, color: "#fbbf24" },
+      platinum: { name: "Platinum ($5,000)", volume: 0, count: 0, color: "#a855f7" },
+      diamond: { name: "Diamond ($10,000)", volume: 0, count: 0, color: "#38bdf8" },
+    };
+
+    for (const inv of allInvestments) {
+      const key = (inv.plan_key || "silver").toLowerCase();
+      if (planMap[key]) {
+        planMap[key].volume += Number(inv.principal || 0);
+        planMap[key].count += 1;
+      }
+    }
+    const totalPlanVolume = Object.values(planMap).reduce((sum, p) => sum + p.volume, 0) || 1;
+    const plan_breakdown = Object.entries(planMap).map(([key, data]) => ({
+      key,
+      name: data.name,
+      volume: Math.round(data.volume * 100) / 100,
+      count: data.count,
+      percentage: Math.round((data.volume / totalPlanVolume) * 1000) / 10,
+      color: data.color,
+    }));
+
+    const kycApproved = nonAdminUsers.filter((u) => u.kyc_status === "approved").length;
+    const kycPending = nonAdminUsers.filter((u) => u.kyc_status === "pending").length;
+    const kycRejected = nonAdminUsers.filter((u) => u.kyc_status === "rejected").length;
+    const kycNone = nonAdminUsers.filter((u) => !u.kyc_status || u.kyc_status === "none").length;
+    const totalU = nonAdminUsers.length || 1;
+
+    const kyc_funnel = [
+      { status: "Approved", count: kycApproved, percentage: Math.round((kycApproved / totalU) * 100), color: "#10b981" },
+      { status: "Pending Review", count: kycPending, percentage: Math.round((kycPending / totalU) * 100), color: "#f59e0b" },
+      { status: "Not Submitted", count: kycNone, percentage: Math.round((kycNone / totalU) * 100), color: "#64748b" },
+      { status: "Rejected", count: kycRejected, percentage: Math.round((kycRejected / totalU) * 100), color: "#f43f5e" },
+    ];
+
+    const periodNewUsers = buckets.reduce((sum, b) => sum + b.new_users, 0);
+    const periodApprovedDeposits = buckets.reduce((sum, b) => sum + b.approved_deposits, 0);
+    const periodPendingDeposits = buckets.reduce((sum, b) => sum + b.pending_deposits, 0);
+    const totalApprovedDepositsOverall = allDeposits
+      .filter((d) => d.status === "approved")
+      .reduce((sum, d) => sum + Number(d.approved_amount || d.amount || 0), 0);
+
+    const usersWithDeposits = new Set(allDeposits.filter((d) => d.status === "approved").map((d) => d.user_id)).size;
+    const depositConversionRate = nonAdminUsers.length > 0 ? Math.round((usersWithDeposits / nonAdminUsers.length) * 1000) / 10 : 0;
+
+    let peakDepositDay = { date: "—", amount: 0 };
+    let peakRegDay = { date: "—", count: 0 };
+    for (const b of buckets) {
+      if (b.approved_deposits > peakDepositDay.amount) {
+        peakDepositDay = { date: b.formatted_date, amount: b.approved_deposits };
+      }
+      if (b.new_users > peakRegDay.count) {
+        peakRegDay = { date: b.formatted_date, count: b.new_users };
+      }
+    }
+
+    const half = Math.floor(buckets.length / 2);
+    const firstHalfUsers = buckets.slice(0, half).reduce((sum, b) => sum + b.new_users, 0) || 1;
+    const secondHalfUsers = buckets.slice(half).reduce((sum, b) => sum + b.new_users, 0);
+    const userGrowthRate = Math.round(((secondHalfUsers - firstHalfUsers) / firstHalfUsers) * 1000) / 10;
+
+    const firstHalfDeps = buckets.slice(0, half).reduce((sum, b) => sum + b.approved_deposits, 0) || 1;
+    const secondHalfDeps = buckets.slice(half).reduce((sum, b) => sum + b.approved_deposits, 0);
+    const depositGrowthRate = Math.round(((secondHalfDeps - firstHalfDeps) / firstHalfDeps) * 1000) / 10;
+
+    const totalDepCount = allDeposits.filter((d) => d.status === "approved").length;
+    const avgDepositAmount = totalDepCount > 0 ? Math.round((totalApprovedDepositsOverall / totalDepCount) * 100) / 100 : 0;
+
+    return {
+      period,
+      summary: {
+        total_users: nonAdminUsers.length,
+        period_new_users: periodNewUsers,
+        user_growth_rate: userGrowthRate,
+        total_approved_deposits: fmt(totalApprovedDepositsOverall),
+        period_approved_deposits: fmt(periodApprovedDeposits),
+        period_pending_deposits: fmt(periodPendingDeposits),
+        deposit_growth_rate: depositGrowthRate,
+        deposit_conversion_rate: depositConversionRate,
+        avg_deposit_amount: fmt(avgDepositAmount),
+        active_investors_count: nonAdminUsers.filter((u) => u.status === "active").length,
+        peak_deposit_day: { date: peakDepositDay.date, amount: fmt(peakDepositDay.amount) },
+        peak_registration_day: { date: peakRegDay.date, count: peakRegDay.count },
+      },
+      time_series: buckets,
+      network_breakdown,
+      plan_breakdown,
+      kyc_funnel,
     };
   }
 }
