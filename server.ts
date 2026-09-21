@@ -37,7 +37,6 @@ import {
   getSupabaseAdmin,
   getSupabaseServerClient,
 } from "./src/server/supabaseAdmin";
-import { supabaseSync } from "./src/server/supabaseSync";
 import { supabaseDb } from "./src/server/supabaseDb";
 import {
   requireDatabaseHealthy,
@@ -1222,6 +1221,15 @@ const supportManager = new SupportManager(
 );
 supportManager.seedDefaultFaqs();
 const supportAiService = new SupportAiService(db, supportManager);
+
+if (isSupabaseAdminConfigured()) {
+  supportManager.initFromSupabase().catch((err) => {
+    console.warn("[EasyX] Error initializing support manager from Supabase:", err?.message);
+  });
+  supportAiService.initFromSupabase().catch((err) => {
+    console.warn("[EasyX] Error initializing support AI service from Supabase:", err?.message);
+  });
+}
 
 const getUserSafe = (userId: string) => {
   return { id: userId, name: "User", email: "N/A", phone: "N/A", referral_code: "N/A" };
@@ -6657,7 +6665,7 @@ api.get("/admin/notifications/analytics", adminMiddleware, (req, res) => {
 // --- SUPPORT ATTACHMENT ENDPOINTS ---
 
 // Upload attachment (Supports single file or up to 3 files)
-const handleAttachmentUpload = (req: Request, res: Response) => {
+const handleAttachmentUpload = async (req: Request, res: Response) => {
   try {
     const authUser = (req as any).user;
     const rawFiles: Express.Multer.File[] = [];
@@ -6699,11 +6707,20 @@ const handleAttachmentUpload = (req: Request, res: Response) => {
         });
       }
 
-      const attId = `att_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
-      const uniqueFileName = `${attId}.${validation.ext}`;
-      const filePath = path.join(SUPPORT_ATTACHMENTS_DIR, uniqueFileName);
+      const attId = crypto.randomUUID();
+      const storagePath = `${authUser.id}/${attId}.${validation.ext}`;
 
-      fs.writeFileSync(filePath, f.buffer);
+      const adminClient = getSupabaseAdmin();
+      const { error: uploadErr } = await adminClient.storage
+        .from("support-attachments")
+        .upload(storagePath, f.buffer, {
+          contentType: validation.fileType,
+          upsert: true,
+        });
+
+      if (uploadErr) {
+        throw new Error(`Failed to upload to storage: ${uploadErr.message}`);
+      }
 
       const sanitizedName = sanitizeFileName(f.originalname);
       const attachment: SupportAttachment = {
@@ -6716,10 +6733,23 @@ const handleAttachmentUpload = (req: Request, res: Response) => {
         file_type: validation.fileType,
         file_size: f.size || f.buffer.length,
         size: f.size || f.buffer.length,
-        storage_reference: uniqueFileName,
+        storage_reference: storagePath,
         url: `/api/support/attachments/${attId}`,
         created_at: nowIso(),
       };
+
+      await adminClient.from("support_attachments").insert({
+        id: attId,
+        ticket_id: req.body?.ticket_id && req.body.ticket_id.length === 36 ? req.body.ticket_id : null,
+        message_id: null,
+        uploaded_by: authUser.id,
+        original_name: sanitizedName,
+        mime_type: validation.fileType,
+        file_size: f.size || f.buffer.length,
+        storage_path: storagePath,
+        storage_bucket: "support-attachments",
+        created_at: attachment.created_at,
+      });
 
       db.support_attachments.set(attId, attachment);
       savedList.push(attachment);
@@ -6750,7 +6780,29 @@ api.post("/admin/support/attachment/upload", adminMiddleware, upload.single("fil
 const handleAttachmentServe = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const attachment = db.support_attachments.get(id);
+    let attachment = db.support_attachments.get(id);
+
+    const adminClient = getSupabaseAdmin();
+    if (!attachment && isSupabaseAdminConfigured()) {
+      const { data: attRow } = await adminClient.from("support_attachments").select("*").eq("id", id).maybeSingle();
+      if (attRow) {
+        attachment = {
+          id: attRow.id,
+          ticket_id: attRow.ticket_id,
+          message_id: attRow.message_id,
+          uploaded_by: attRow.uploaded_by,
+          file_name: attRow.original_name,
+          name: attRow.original_name,
+          file_type: attRow.mime_type,
+          file_size: attRow.file_size,
+          size: attRow.file_size,
+          storage_reference: attRow.storage_path,
+          url: `/api/support/attachments/${attRow.id}`,
+          created_at: attRow.created_at,
+        };
+        db.support_attachments.set(id, attachment);
+      }
+    }
 
     if (!attachment) {
       return res.status(404).json({ detail: "Support attachment not found." });
@@ -6800,11 +6852,6 @@ const handleAttachmentServe = async (req: Request, res: Response) => {
       return res.status(403).json({ detail: "Access denied to this support attachment." });
     }
 
-    const filePath = path.join(SUPPORT_ATTACHMENTS_DIR, attachment.storage_reference);
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ detail: "Attachment file missing from storage." });
-    }
-
     res.setHeader("Content-Type", attachment.file_type || "image/jpeg");
     const isDownload = req.query.download === "1" || req.query.download === "true";
     const disposition = isDownload ? "attachment" : "inline";
@@ -6812,8 +6859,26 @@ const handleAttachmentServe = async (req: Request, res: Response) => {
     res.setHeader("Cache-Control", "private, max-age=3600, no-transform");
     res.setHeader("X-Content-Type-Options", "nosniff");
 
-    const stream = fs.createReadStream(filePath);
-    stream.pipe(res);
+    // Try Supabase Storage first
+    if (isSupabaseAdminConfigured()) {
+      const { data: fileBlob, error: dlErr } = await adminClient.storage
+        .from("support-attachments")
+        .download(attachment.storage_reference);
+
+      if (!dlErr && fileBlob) {
+        const buffer = Buffer.from(await fileBlob.arrayBuffer());
+        return res.send(buffer);
+      }
+    }
+
+    // Fallback to local disk if legacy file exists
+    const filePath = path.join(SUPPORT_ATTACHMENTS_DIR, attachment.storage_reference);
+    if (fs.existsSync(filePath)) {
+      const stream = fs.createReadStream(filePath);
+      return stream.pipe(res);
+    }
+
+    return res.status(404).json({ detail: "Attachment file missing from storage." });
   } catch (err: any) {
     console.error("[Support] Serve attachment error:", err);
     res.status(500).json({ detail: "Failed to load attachment." });
@@ -6824,11 +6889,32 @@ api.get("/support/attachments/:id", handleAttachmentServe);
 api.get("/admin/support/attachments/:id", handleAttachmentServe);
 
 // Delete attachment
-const handleAttachmentDelete = (req: Request, res: Response) => {
+const handleAttachmentDelete = async (req: Request, res: Response) => {
   try {
     const authUser = (req as any).user;
     const { id } = req.params;
-    const attachment = db.support_attachments.get(id);
+    let attachment = db.support_attachments.get(id);
+
+    const adminClient = getSupabaseAdmin();
+    if (!attachment && isSupabaseAdminConfigured()) {
+      const { data: attRow } = await adminClient.from("support_attachments").select("*").eq("id", id).maybeSingle();
+      if (attRow) {
+        attachment = {
+          id: attRow.id,
+          ticket_id: attRow.ticket_id,
+          message_id: attRow.message_id,
+          uploaded_by: attRow.uploaded_by,
+          file_name: attRow.original_name,
+          name: attRow.original_name,
+          file_type: attRow.mime_type,
+          file_size: attRow.file_size,
+          size: attRow.file_size,
+          storage_reference: attRow.storage_path,
+          url: `/api/support/attachments/${attRow.id}`,
+          created_at: attRow.created_at,
+        };
+      }
+    }
 
     if (!attachment) {
       return res.status(404).json({ detail: "Support attachment not found." });
@@ -6837,6 +6923,11 @@ const handleAttachmentDelete = (req: Request, res: Response) => {
     // Must be uploader or admin
     if (authUser.role !== "admin" && attachment.uploaded_by !== authUser.id) {
       return res.status(403).json({ detail: "Access denied. You cannot delete this attachment." });
+    }
+
+    if (isSupabaseAdminConfigured()) {
+      await adminClient.storage.from("support-attachments").remove([attachment.storage_reference]);
+      await adminClient.from("support_attachments").delete().eq("id", id);
     }
 
     const filePath = path.join(SUPPORT_ATTACHMENTS_DIR, attachment.storage_reference);
@@ -8147,9 +8238,9 @@ api.get("/admin/support/ai/analytics", adminMiddleware, (_req, res) => {
 // ==================== PROMOTIONAL MEDIA CAROUSEL API ====================
 
 // User: Get active published promotions for dashboard carousel
-api.get("/promotions", (_req, res) => {
+api.get("/promotions", async (_req, res) => {
   try {
-    const items = promotionsService.getActivePromotions();
+    const items = await promotionsService.getActivePromotions();
     res.json(items);
   } catch (err: any) {
     console.error("[Promotions] Get active promotions error:", err);
@@ -8158,9 +8249,9 @@ api.get("/promotions", (_req, res) => {
 });
 
 // Admin: Get all promotions (published + drafts)
-api.get("/admin/promotions", adminMiddleware, (_req, res) => {
+api.get("/admin/promotions", adminMiddleware, async (_req, res) => {
   try {
-    const items = promotionsService.getAllPromotions();
+    const items = await promotionsService.getAllPromotions();
     res.json(items);
   } catch (err: any) {
     console.error("[Admin Promotions] Get all promotions error:", err);
@@ -8169,7 +8260,7 @@ api.get("/admin/promotions", adminMiddleware, (_req, res) => {
 });
 
 // Admin: Create promotion
-api.post("/admin/promotions", adminMiddleware, (req, res) => {
+api.post("/admin/promotions", adminMiddleware, async (req, res) => {
   try {
     const admin = (req as any).user;
     const body = req.body || {};
@@ -8180,7 +8271,7 @@ api.post("/admin/promotions", adminMiddleware, (req, res) => {
       return res.status(400).json({ detail: "Media URL is required." });
     }
 
-    const created = promotionsService.createPromotion(body);
+    const created = await promotionsService.createPromotion(body);
     logAudit("PROMOTION_CREATED", admin, "promotion", created.id, {
       title: created.title,
       media_type: created.media_type,
@@ -8195,13 +8286,13 @@ api.post("/admin/promotions", adminMiddleware, (req, res) => {
 });
 
 // Admin: Update promotion
-api.put("/admin/promotions/:id", adminMiddleware, (req, res) => {
+api.put("/admin/promotions/:id", adminMiddleware, async (req, res) => {
   try {
     const admin = (req as any).user;
     const { id } = req.params;
     const body = req.body || {};
 
-    const updated = promotionsService.updatePromotion(id, body);
+    const updated = await promotionsService.updatePromotion(id, body);
     if (!updated) {
       return res.status(404).json({ detail: "Promotion not found." });
     }
@@ -8219,7 +8310,7 @@ api.put("/admin/promotions/:id", adminMiddleware, (req, res) => {
 });
 
 // Admin: Update status (toggle publish/draft)
-api.patch("/admin/promotions/:id/status", adminMiddleware, (req, res) => {
+api.patch("/admin/promotions/:id/status", adminMiddleware, async (req, res) => {
   try {
     const admin = (req as any).user;
     const { id } = req.params;
@@ -8229,7 +8320,7 @@ api.patch("/admin/promotions/:id/status", adminMiddleware, (req, res) => {
       return res.status(400).json({ detail: "Invalid status value." });
     }
 
-    const updated = promotionsService.setStatus(id, status);
+    const updated = await promotionsService.setStatus(id, status);
     if (!updated) {
       return res.status(404).json({ detail: "Promotion not found." });
     }
@@ -8244,12 +8335,12 @@ api.patch("/admin/promotions/:id/status", adminMiddleware, (req, res) => {
 });
 
 // Admin: Delete promotion
-api.delete("/admin/promotions/:id", adminMiddleware, (req, res) => {
+api.delete("/admin/promotions/:id", adminMiddleware, async (req, res) => {
   try {
     const admin = (req as any).user;
     const { id } = req.params;
 
-    const deleted = promotionsService.deletePromotion(id);
+    const deleted = await promotionsService.deletePromotion(id);
     if (!deleted) {
       return res.status(404).json({ detail: "Promotion not found." });
     }
@@ -8264,7 +8355,7 @@ api.delete("/admin/promotions/:id", adminMiddleware, (req, res) => {
 });
 
 // Admin: Reorder promotions
-api.post("/admin/promotions/reorder", adminMiddleware, (req, res) => {
+api.post("/admin/promotions/reorder", adminMiddleware, async (req, res) => {
   try {
     const admin = (req as any).user;
     const { ordered_ids } = req.body || {};
@@ -8272,7 +8363,7 @@ api.post("/admin/promotions/reorder", adminMiddleware, (req, res) => {
       return res.status(400).json({ detail: "ordered_ids must be an array of IDs." });
     }
 
-    const items = promotionsService.reorder(ordered_ids);
+    const items = await promotionsService.reorder(ordered_ids);
     logAudit("PROMOTIONS_REORDERED", admin, "promotion", "batch", { count: ordered_ids.length });
 
     res.json({ ok: true, items });
@@ -8283,10 +8374,10 @@ api.post("/admin/promotions/reorder", adminMiddleware, (req, res) => {
 });
 
 // Admin: Reset to sample defaults
-api.post("/admin/promotions/reset", adminMiddleware, (req, res) => {
+api.post("/admin/promotions/reset", adminMiddleware, async (req, res) => {
   try {
     const admin = (req as any).user;
-    const items = promotionsService.resetToDefaults();
+    const items = await promotionsService.resetToDefaults();
     logAudit("PROMOTIONS_RESET_DEFAULTS", admin, "promotion", "defaults");
     res.json({ ok: true, items });
   } catch (err: any) {

@@ -38,8 +38,8 @@ function RootRoute() {
     }
   };
 
-  // 1. If database is unhealthy and user has a token or is authenticated, show server unavailable
-  if (!isDatabaseHealthy && (user || (typeof localStorage !== "undefined" && localStorage.getItem("easyx_token")))) {
+  // 1. If database is unhealthy, show server unavailable
+  if (!isDatabaseHealthy) {
     return (
       <ServerUnavailableView
         onRetry={handleRetry}

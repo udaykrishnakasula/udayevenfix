@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { supabaseDb } from "./supabaseDb";
+import { getSupabaseAdmin, isSupabaseAdminConfigured } from "./supabaseAdmin";
 import {
   type ReminderWorkflowConfig,
   type ReminderGlobalSettings,
@@ -62,6 +63,61 @@ export class ReminderEngine {
     }
   }
 
+  /**
+   * Initializes reminder settings and past execution logs directly from Supabase.
+   */
+  public async initFromSupabase(): Promise<void> {
+    if (!isSupabaseAdminConfigured()) return;
+    try {
+      const adminClient = getSupabaseAdmin();
+
+      // 1. Load Reminder Settings from platform_settings
+      const { data: setRow } = await adminClient
+        .from("platform_settings")
+        .select("value")
+        .eq("key", "reminder_settings")
+        .maybeSingle();
+
+      if (setRow?.value) {
+        this.db.reminder_settings = {
+          global: { ...DEFAULT_REMINDER_GLOBAL_SETTINGS, ...(setRow.value.global || {}) },
+          workflows: Array.isArray(setRow.value.workflows)
+            ? setRow.value.workflows
+            : DEFAULT_REMINDER_WORKFLOWS,
+        };
+      }
+
+      // 2. Load execution logs from reminder_execution_logs
+      const { data: logRows } = await adminClient
+        .from("reminder_execution_logs")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(1000);
+
+      if (logRows && Array.isArray(logRows)) {
+        this.db.reminder_logs = logRows.map((r: any) => ({
+          id: r.id,
+          user_id: r.user_id,
+          user_name: r.metadata?.user_name || "User",
+          user_email: r.metadata?.user_email || "N/A",
+          workflow: r.workflow,
+          stage: r.stage,
+          scheduled_at: r.scheduled_for || r.created_at,
+          sent_at: r.sent_at,
+          channel: r.channel,
+          status: r.status,
+          reason: r.reason,
+          push_status: r.push_status,
+          action_completed: Boolean(r.action_completed),
+          completed_at: r.completed_at,
+          created_at: r.created_at,
+        }));
+      }
+    } catch (err: any) {
+      console.warn("[ReminderEngine] Notice initializing from Supabase:", err?.message || err);
+    }
+  }
+
   public getGlobalSettings(): ReminderGlobalSettings {
     this.ensureInitialized();
     return this.db.reminder_settings.global || DEFAULT_REMINDER_GLOBAL_SETTINGS;
@@ -73,6 +129,7 @@ export class ReminderEngine {
       ...this.db.reminder_settings.global,
       ...settings,
     };
+    this.persistSettings();
   }
 
   public getWorkflows(): ReminderWorkflowConfig[] {
@@ -83,6 +140,7 @@ export class ReminderEngine {
   public setWorkflows(workflows: ReminderWorkflowConfig[]) {
     this.ensureInitialized();
     this.db.reminder_settings.workflows = workflows;
+    this.persistSettings();
   }
 
   public getSettings(): { global: ReminderGlobalSettings; workflows: ReminderWorkflowConfig[] } {
@@ -99,7 +157,22 @@ export class ReminderEngine {
     const idx = list.findIndex((w) => w.key === key);
     if (idx === -1) return null;
     list[idx] = { ...list[idx], ...patch };
+    this.persistSettings();
     return list[idx];
+  }
+
+  private persistSettings() {
+    if (isSupabaseAdminConfigured()) {
+      const adminClient = getSupabaseAdmin();
+      adminClient.from("platform_settings").upsert({
+        key: "reminder_settings",
+        value: this.db.reminder_settings,
+        description: "Automated Reminder Settings & Workflows",
+        updated_at: new Date().toISOString(),
+      }).then(({ error }) => {
+        if (error) console.warn("[ReminderEngine] Error persisting settings to Supabase:", error.message);
+      });
+    }
   }
 
   public getUserPreferences(userId: string): UserNotificationPreferences {
@@ -114,16 +187,59 @@ export class ReminderEngine {
     const current = this.getUserPreferences(userId);
     const updated = { ...current, ...prefs };
     this.db.user_preferences.set(userId, updated);
+
+    if (isSupabaseAdminConfigured()) {
+      const adminClient = getSupabaseAdmin();
+      adminClient.from("platform_settings").upsert({
+        key: `user_prefs:${userId}`,
+        value: updated,
+        description: `Notification preferences for user ${userId}`,
+        updated_at: new Date().toISOString(),
+      }).then(({ error }) => {
+        if (error) console.warn("[ReminderEngine] Error saving user prefs to Supabase:", error.message);
+      });
+    }
+
     return updated;
   }
 
-  public registerPushSubscription(userId: string, subscription: any) {
+  public async registerPushSubscription(userId: string, subscription: any, userAgent?: string): Promise<void> {
     this.ensureInitialized();
     this.db.push_subscriptions.set(userId, {
       userId,
       subscription,
       updated_at: nowIso(),
     });
+
+    if (isSupabaseAdminConfigured() && subscription?.endpoint) {
+      try {
+        const adminClient = getSupabaseAdmin();
+        await adminClient.from("user_push_subscriptions").upsert({
+          user_id: userId,
+          endpoint: subscription.endpoint,
+          p256dh: subscription.keys?.p256dh || null,
+          auth: subscription.keys?.auth || null,
+          user_agent: userAgent || null,
+          updated_at: nowIso(),
+        }, { onConflict: "endpoint" });
+      } catch (err: any) {
+        console.warn("[ReminderEngine] Error saving push subscription to Supabase:", err?.message || err);
+      }
+    }
+  }
+
+  public async unregisterPushSubscription(userId: string): Promise<void> {
+    this.ensureInitialized();
+    this.db.push_subscriptions.delete(userId);
+
+    if (isSupabaseAdminConfigured()) {
+      try {
+        const adminClient = getSupabaseAdmin();
+        await adminClient.from("user_push_subscriptions").delete().eq("user_id", userId);
+      } catch (err: any) {
+        console.warn("[ReminderEngine] Error removing push subscription from Supabase:", err?.message || err);
+      }
+    }
   }
 
   public getReminderLogs(): ReminderLogEntry[] {
@@ -133,7 +249,7 @@ export class ReminderEngine {
 
   /**
    * Called when a user performs a key action (e.g. deposit, KYC submit/approve, investment)
-   * to mark past reminder conversions and stop future reminders.
+   * to mark past reminder conversions in Supabase and stop future reminders.
    */
   public handleUserActionCompleted(userId: string, actionType: "deposit" | "kyc" | "investment") {
     this.ensureInitialized();
@@ -153,69 +269,78 @@ export class ReminderEngine {
         updated++;
       }
     }
+
+    if (isSupabaseAdminConfigured() && targetWorkflows.length > 0) {
+      const adminClient = getSupabaseAdmin();
+      adminClient
+        .from("reminder_execution_logs")
+        .update({ action_completed: true, completed_at: now })
+        .eq("user_id", userId)
+        .in("workflow", targetWorkflows)
+        .eq("action_completed", false)
+        .then(({ error }) => {
+          if (error) console.warn("[ReminderEngine] Error updating conversions in Supabase:", error.message);
+        });
+    }
+
     return updated;
   }
 
   /**
    * Evaluates if a user has completed the condition that stops the workflow
    */
-  private isWorkflowStopConditionMet(user: any, workflowKey: string): { stop: boolean; reason?: string } {
+  private isWorkflowStopConditionMet(
+    user: any,
+    workflowKey: string,
+    context?: {
+      depositedUserIds?: Set<string>;
+      investedUserIds?: Set<string>;
+      positiveWalletUserIds?: Set<string>;
+      kycStatusMap?: Map<string, string>;
+    }
+  ): { stop: boolean; reason?: string } {
     if (user.status !== "active") {
       return { stop: true, reason: `User status is '${user.status}' (not active)` };
     }
 
     if (workflowKey === "no_deposit") {
-      // Check if user has made any deposit (approved or pending)
-      for (const dep of this.db.deposits.values()) {
-        if (dep.user_id === user.id && (dep.status === "approved" || dep.status === "pending")) {
-          return { stop: true, reason: `Deposit already initiated/approved (id: ${dep.id}, status: ${dep.status})` };
-        }
+      if (context?.depositedUserIds?.has(user.id)) {
+        return { stop: true, reason: "Deposit already initiated or approved" };
       }
-      // Check if wallet has positive balance or total invested
-      const wallet = this.db.wallets.get(user.id);
-      if (wallet && (Number(wallet.available_balance || 0) > 0 || Number(wallet.total_invested || 0) > 0)) {
-        return { stop: true, reason: `Wallet has balance (${wallet.available_balance} USDT)` };
+      if (context?.positiveWalletUserIds?.has(user.id)) {
+        return { stop: true, reason: "Wallet already has positive balance" };
       }
-      // Check if any investment exists
-      for (const inv of this.db.investments.values()) {
-        if (inv.user_id === user.id && inv.status !== "cancelled") {
-          return { stop: true, reason: `User already has investment (id: ${inv.id})` };
-        }
+      if (context?.investedUserIds?.has(user.id)) {
+        return { stop: true, reason: "User already has an investment" };
       }
       return { stop: false };
     }
 
     if (workflowKey === "kyc_incomplete") {
-      if (user.kyc_status === "approved") {
+      const kycStatus = context?.kycStatusMap?.get(user.id) || user.kyc_status;
+      if (kycStatus === "approved") {
         return { stop: true, reason: "KYC already approved" };
       }
-      if (user.kyc_status === "pending") {
+      if (kycStatus === "pending" || kycStatus === "under_review") {
         return { stop: true, reason: "KYC is currently pending review" };
-      }
-      const kycRec = this.db.kyc_records.get(user.id);
-      if (kycRec && (kycRec.status === "approved" || kycRec.status === "pending")) {
-        return { stop: true, reason: `KYC record status is '${kycRec.status}'` };
       }
       return { stop: false };
     }
 
     if (workflowKey === "kyc_rejected") {
-      if (user.kyc_status === "approved" || user.kyc_status === "pending") {
-        return { stop: true, reason: `KYC status resolved to '${user.kyc_status}'` };
+      const kycStatus = context?.kycStatusMap?.get(user.id) || user.kyc_status;
+      if (kycStatus === "approved" || kycStatus === "pending" || kycStatus === "under_review") {
+        return { stop: true, reason: `KYC status resolved to '${kycStatus}'` };
       }
       return { stop: false };
     }
 
     if (workflowKey === "investment_reminder") {
-      const wallet = this.db.wallets.get(user.id);
-      const balance = Number(wallet?.available_balance || 0);
-      if (balance < 300) {
-        return { stop: true, reason: `Insufficient wallet balance (${balance} USDT < $300 minimum plan)` };
+      if (!context?.positiveWalletUserIds?.has(user.id)) {
+        return { stop: true, reason: "Insufficient wallet balance (< $300 minimum plan)" };
       }
-      for (const inv of this.db.investments.values()) {
-        if (inv.user_id === user.id && inv.status === "active") {
-          return { stop: true, reason: "User has active investment" };
-        }
+      if (context?.investedUserIds?.has(user.id)) {
+        return { stop: true, reason: "User has active investment" };
       }
       return { stop: false };
     }
@@ -250,19 +375,65 @@ export class ReminderEngine {
     const workflows = this.getWorkflows().filter((w) => w.enabled);
 
     let users: any[] = [];
-    try {
-      users = (await supabaseDb.listAllUsers()).filter((u: any) => u.role !== "admin");
-    } catch (err: any) {
-      console.warn("[ReminderEngine] Notice fetching users from Supabase:", err?.message);
-    }
-    const logs: ReminderLogEntry[] = this.db.reminder_logs;
+    let depositedUserIds = new Set<string>();
+    let investedUserIds = new Set<string>();
+    let positiveWalletUserIds = new Set<string>();
+    let kycStatusMap = new Map<string, string>();
+    let pushSubscribedUserIds = new Set<string>();
 
+    if (isSupabaseAdminConfigured()) {
+      try {
+        const adminClient = getSupabaseAdmin();
+        const [
+          allUsers,
+          { data: deposits },
+          { data: investments },
+          { data: wallets },
+          { data: kycRecords },
+          { data: pushSubs },
+        ] = await Promise.all([
+          supabaseDb.listAllUsers(),
+          adminClient.from("payment_deposits").select("user_id, status").in("status", ["approved", "pending"]),
+          adminClient.from("investments").select("user_id, status").neq("status", "cancelled"),
+          adminClient.from("wallets").select("user_id, available_balance, total_invested"),
+          adminClient.from("kyc_records").select("user_id, status"),
+          adminClient.from("user_push_subscriptions").select("user_id"),
+        ]);
+
+        users = (allUsers || []).filter((u: any) => u.role !== "admin");
+
+        if (Array.isArray(deposits)) {
+          for (const d of deposits) depositedUserIds.add(d.user_id);
+        }
+        if (Array.isArray(investments)) {
+          for (const inv of investments) investedUserIds.add(inv.user_id);
+        }
+        if (Array.isArray(wallets)) {
+          for (const w of wallets) {
+            if (Number(w.available_balance || 0) >= 300 || Number(w.total_invested || 0) > 0) {
+              positiveWalletUserIds.add(w.user_id);
+            }
+          }
+        }
+        if (Array.isArray(kycRecords)) {
+          for (const k of kycRecords) kycStatusMap.set(k.user_id, k.status);
+        }
+        if (Array.isArray(pushSubs)) {
+          for (const ps of pushSubs) pushSubscribedUserIds.add(ps.user_id);
+        }
+      } catch (err: any) {
+        console.warn("[ReminderEngine] Notice fetching authoritative state from Supabase:", err?.message);
+      }
+    }
+
+    const logs: ReminderLogEntry[] = this.db.reminder_logs;
     let remindersSent = 0;
     let remindersSkipped = 0;
     let workflowsStopped = 0;
     const details: any[] = [];
 
     const inQuietHours = isWithinQuietHours(now, globalSettings.quiet_hours);
+    const context = { depositedUserIds, investedUserIds, positiveWalletUserIds, kycStatusMap };
 
     for (const user of users) {
       if (user.status !== "active") continue;
@@ -290,9 +461,8 @@ export class ReminderEngine {
         }
 
         // 2. Condition-First Check: Stop Condition
-        const stopCheck = this.isWorkflowStopConditionMet(user, wf.key);
+        const stopCheck = this.isWorkflowStopConditionMet(user, wf.key, context);
         if (stopCheck.stop) {
-          // If condition met, make sure past reminders are marked converted if applicable
           if (wf.key === "no_deposit") this.handleUserActionCompleted(user.id, "deposit");
           if (wf.key === "kyc_incomplete") this.handleUserActionCompleted(user.id, "kyc");
 
@@ -324,12 +494,6 @@ export class ReminderEngine {
 
         // 4. Calculate Elapsed Time from Trigger Event
         let triggerTime = user.created_at ? new Date(user.created_at).getTime() : nowTimestamp;
-        if (wf.key === "kyc_rejected") {
-          const kycRec = this.db.kyc_records.get(user.id);
-          if (kycRec?.reviewed_at) {
-            triggerTime = new Date(kycRec.reviewed_at).getTime();
-          }
-        }
         const elapsedHours = (nowTimestamp - triggerTime) / (1000 * 60 * 60);
 
         // 5. Anti-Spam: Max 1 reminder per workflow per day
@@ -342,7 +506,7 @@ export class ReminderEngine {
             l.sent_at.startsWith(todayDateKey)
         );
         if (sentTodayForWorkflow) {
-          continue; // Already reminded today for this workflow, skip smoothly
+          continue;
         }
 
         // 6. Find Eligible Schedule Stage
@@ -351,30 +515,22 @@ export class ReminderEngine {
 
         for (let i = 0; i < maxLimit; i++) {
           const sched = wf.schedules[i];
-          if (!sched) continue;
-
-          // Check if this exact stage was already sent
           const alreadySentStage = logs.some(
             (l) => l.user_id === user.id && l.workflow === wf.key && l.stage === sched.stage && l.status === "SENT"
           );
-          if (alreadySentStage) {
-            continue; // Already received stage i
-          }
 
-          // Check if elapsed time has reached this stage's required delay
-          if (elapsedHours >= sched.delay_hours) {
+          if (!alreadySentStage && elapsedHours >= sched.delay_hours) {
             dueSchedule = sched;
-            break; // Found earliest unsent due stage
+            break;
           }
         }
 
         if (!dueSchedule) {
-          // No stage due right now
           continue;
         }
 
-        // 7. Check Quiet Hours
-        if (inQuietHours) {
+        // 7. Quiet Hours Check
+        if (inQuietHours && globalSettings.quiet_hours.enabled) {
           details.push({
             userId: user.id,
             userEmail: user.email,
@@ -393,7 +549,7 @@ export class ReminderEngine {
         const idempotencyKey = `rem:${wf.key}:${user.id}:stage_${dueSchedule.stage}`;
 
         // Create In-App Notification using existing notification store
-        const inAppSuccess = this.createNotificationFn(
+        this.createNotificationFn(
           user.id,
           "automated_reminder",
           title,
@@ -409,12 +565,12 @@ export class ReminderEngine {
           }
         );
 
-        // Attempt Push Notification if subscription exists
+        // Attempt Push Notification if subscription exists in Supabase or memory
         let pushStatus: "success" | "failed" | "not_subscribed" | "disabled" = "not_subscribed";
         if (dueSchedule.push_enabled && globalSettings.push_notifications_enabled) {
-          const pushSub = this.db.push_subscriptions?.get(user.id);
-          if (pushSub) {
-            pushStatus = "success"; // Web push dispatched
+          const hasPushSub = pushSubscribedUserIds.has(user.id) || this.db.push_subscriptions?.has(user.id);
+          if (hasPushSub) {
+            pushStatus = "success";
           }
         } else if (!dueSchedule.push_enabled || !globalSettings.push_notifications_enabled) {
           pushStatus = "disabled";
@@ -443,6 +599,35 @@ export class ReminderEngine {
         };
 
         logs.unshift(logEntry);
+
+        // Authoritatively persist record into Supabase reminder_execution_logs
+        if (isSupabaseAdminConfigured()) {
+          const adminClient = getSupabaseAdmin();
+          adminClient.from("reminder_execution_logs").insert({
+            id: logEntry.id,
+            user_id: user.id,
+            workflow: wf.key,
+            stage: dueSchedule.stage,
+            scheduled_for: logEntry.scheduled_at,
+            sent_at: logEntry.sent_at,
+            channel: logEntry.channel,
+            status: logEntry.status,
+            reason: logEntry.reason,
+            push_status: logEntry.push_status,
+            action_completed: false,
+            completed_at: null,
+            metadata: {
+              user_email: user.email,
+              user_name: user.name,
+              action_url: dueSchedule.action_url,
+              action_text: dueSchedule.action_text,
+            },
+            created_at: logEntry.created_at,
+          }).then(({ error }) => {
+            if (error) console.warn("[ReminderEngine] Error saving execution log to Supabase:", error.message);
+          });
+        }
+
         remindersSent++;
         details.push({
           userId: user.id,
@@ -471,11 +656,54 @@ export class ReminderEngine {
   public async getAnalytics() {
     this.ensureInitialized();
     let users: any[] = [];
-    try {
-      users = (await supabaseDb.listAllUsers()).filter((u: any) => u.role !== "admin");
-    } catch {}
+    let depositedUserIds = new Set<string>();
+    let investedUserIds = new Set<string>();
+    let positiveWalletUserIds = new Set<string>();
+    let kycStatusMap = new Map<string, string>();
+
+    if (isSupabaseAdminConfigured()) {
+      try {
+        const adminClient = getSupabaseAdmin();
+        const [
+          allUsers,
+          { data: deposits },
+          { data: investments },
+          { data: wallets },
+          { data: kycRecords },
+        ] = await Promise.all([
+          supabaseDb.listAllUsers(),
+          adminClient.from("payment_deposits").select("user_id, status").in("status", ["approved", "pending"]),
+          adminClient.from("investments").select("user_id, status").neq("status", "cancelled"),
+          adminClient.from("wallets").select("user_id, available_balance, total_invested"),
+          adminClient.from("kyc_records").select("user_id, status"),
+        ]);
+
+        users = (allUsers || []).filter((u: any) => u.role !== "admin");
+
+        if (Array.isArray(deposits)) {
+          for (const d of deposits) depositedUserIds.add(d.user_id);
+        }
+        if (Array.isArray(investments)) {
+          for (const inv of investments) investedUserIds.add(inv.user_id);
+        }
+        if (Array.isArray(wallets)) {
+          for (const w of wallets) {
+            if (Number(w.available_balance || 0) >= 300 || Number(w.total_invested || 0) > 0) {
+              positiveWalletUserIds.add(w.user_id);
+            }
+          }
+        }
+        if (Array.isArray(kycRecords)) {
+          for (const k of kycRecords) kycStatusMap.set(k.user_id, k.status);
+        }
+      } catch (err: any) {
+        console.warn("[ReminderEngine] Notice fetching analytics state from Supabase:", err?.message);
+      }
+    }
+
     const logs: ReminderLogEntry[] = this.db.reminder_logs || [];
     const workflows = this.getWorkflows();
+    const context = { depositedUserIds, investedUserIds, positiveWalletUserIds, kycStatusMap };
 
     const totalSent = logs.filter((l) => l.status === "SENT").length;
     const totalConverted = logs.filter((l) => l.status === "SENT" && l.action_completed).length;
@@ -492,7 +720,7 @@ export class ReminderEngine {
       // Eligible users currently needing this workflow
       let eligibleCount = 0;
       for (const u of users) {
-        const stopCheck = this.isWorkflowStopConditionMet(u, wf.key);
+        const stopCheck = this.isWorkflowStopConditionMet(u, wf.key, context);
         if (!stopCheck.stop) eligibleCount++;
       }
 

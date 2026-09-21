@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { supabaseDb } from "./supabaseDb";
+import { getSupabaseAdmin, isSupabaseAdminConfigured } from "./supabaseAdmin";
 import {
   type ReminderWorkflowConfig,
   type ReminderGlobalSettings,
@@ -131,14 +132,65 @@ export class NotificationManager {
   }
 
   /**
+   * Initializes notification campaigns directly from Supabase.
+   */
+  public async initFromSupabase(): Promise<void> {
+    if (!isSupabaseAdminConfigured()) return;
+    try {
+      const adminClient = getSupabaseAdmin();
+      const { data: campaigns } = await adminClient
+        .from("notification_campaigns")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(500);
+
+      if (Array.isArray(campaigns)) {
+        this.db.admin_notification_campaigns = campaigns.map((c: any) => ({
+          id: c.campaign_id || c.id,
+          campaign_id: c.campaign_id || c.id,
+          mode: c.metadata?.mode || "bulk_segment",
+          audience_name: c.audience,
+          title: c.title,
+          body: c.body,
+          type: c.notification_type || "general",
+          channel: c.channel,
+          status: (c.status || "SENT").toUpperCase(),
+          recipients_count: c.total_recipients,
+          sent_count: c.sent_count,
+          failed_count: c.failed_count,
+          push_sent_count: c.metadata?.push_sent_count || 0,
+          push_failed_count: c.metadata?.push_failed_count || 0,
+          sender_admin: c.sender_admin_id || "Admin",
+          created_at: c.created_at,
+        }));
+        this.db.unified_notification_logs = [...this.db.admin_notification_campaigns];
+      }
+    } catch (err: any) {
+      console.warn("[NotificationManager] Error initializing campaigns from Supabase:", err?.message || err);
+    }
+  }
+
+  /**
    * Safe web push delivery simulation / dispatch
    * If push fails, returns status without throwing error.
    */
   public async dispatchWebPush(userId: string, title: string, body: string, actionUrl?: string | null): Promise<"success" | "failed" | "not_subscribed" | "disabled"> {
     try {
-      const sub = this.db.push_subscriptions?.get(userId);
-      if (!sub || !sub.subscription) {
-        return "not_subscribed";
+      let hasSubscription = false;
+      if (isSupabaseAdminConfigured()) {
+        const adminClient = getSupabaseAdmin();
+        const { data } = await adminClient
+          .from("user_push_subscriptions")
+          .select("id")
+          .eq("user_id", userId)
+          .limit(1);
+        hasSubscription = Boolean(data && data.length > 0);
+      }
+      if (!hasSubscription) {
+        const sub = this.db.push_subscriptions?.get(userId);
+        if (!sub || !sub.subscription) {
+          return "not_subscribed";
+        }
       }
 
       // Check if global push is enabled in reminder/platform settings
@@ -156,19 +208,42 @@ export class NotificationManager {
   }
 
   /**
-   * Evaluate which users match a specific segment ID
+   * Evaluate which users match a specific segment ID authoritatively from Supabase
    */
   public async evaluateSegmentUsers(segmentId: string): Promise<any[]> {
     let allUsers: any[] = [];
-    try {
+    let depositsList: any[] = [];
+    let investmentsList: any[] = [];
+    let withdrawalsList: any[] = [];
+    let kycRecordsList: any[] = [];
+
+    if (isSupabaseAdminConfigured()) {
+      try {
+        const adminClient = getSupabaseAdmin();
+        const [
+          usersRes,
+          { data: deps },
+          { data: invs },
+          { data: wds },
+          { data: kycs },
+        ] = await Promise.all([
+          supabaseDb.listAllUsers(),
+          adminClient.from("payment_deposits").select("user_id, status"),
+          adminClient.from("investments").select("user_id, status"),
+          adminClient.from("withdrawals").select("user_id, status"),
+          adminClient.from("kyc_records").select("user_id, status"),
+        ]);
+        allUsers = (usersRes || []).filter((u: any) => u.role !== "admin");
+        depositsList = deps || [];
+        investmentsList = invs || [];
+        withdrawalsList = wds || [];
+        kycRecordsList = kycs || [];
+      } catch (err: any) {
+        console.warn("[NotificationManager] Error fetching segment data from Supabase:", err?.message || err);
+      }
+    } else {
       allUsers = (await supabaseDb.listAllUsers()).filter((u: any) => u.role !== "admin");
-    } catch (err: any) {
-      console.warn("[NotificationManager] Error fetching users from Supabase:", err?.message);
     }
-    const depositsList: any[] = Array.from(this.db.deposits.values());
-    const investmentsList: any[] = Array.from(this.db.investments.values());
-    const withdrawalsList: any[] = Array.from(this.db.withdrawals.values());
-    const kycRecordsList: any[] = Array.from(this.db.kyc_records.values());
 
     const now = Date.now();
     const sevenDaysAgo = now - 7 * 86400000;
@@ -496,6 +571,35 @@ export class NotificationManager {
 
     this.db.unified_notification_logs.unshift(campaignLog);
     this.db.admin_notification_campaigns.unshift(campaignLog);
+
+    if (isSupabaseAdminConfigured()) {
+      const adminClient = getSupabaseAdmin();
+      adminClient.from("notification_campaigns").insert({
+        campaign_id: campaignId,
+        audience: audienceName,
+        title,
+        body: message,
+        notification_type: type || "general",
+        channel,
+        status: failedCount === 0 ? "sent" : sentCount > 0 ? "sent" : "failed",
+        sent_at: new Date().toISOString(),
+        total_recipients: recipientsToProcess.length,
+        sent_count: sentCount,
+        failed_count: failedCount,
+        sender_admin_id: (admin.id && admin.id.length === 36) ? admin.id : null,
+        metadata: {
+          mode: mode === "segment" ? "bulk_segment" : "bulk_manual",
+          push_sent_count: pushSentCount,
+          push_failed_count: pushFailedCount,
+          action_url: actionUrl || null,
+          action_text: actionText || null,
+        },
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }).then(({ error }) => {
+        if (error) console.warn("[NotificationManager] Error inserting campaign into Supabase:", error.message);
+      });
+    }
 
     return {
       ok: true,

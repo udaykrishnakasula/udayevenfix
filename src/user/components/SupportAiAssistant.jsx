@@ -47,9 +47,7 @@ export default function SupportAiAssistant({
   className = "",
 }) {
   const [inputMessage, setInputMessage] = useState("");
-  const [conversationId, setConversationId] = useState(() => {
-    return localStorage.getItem("easyx_support_ai_conv_id") || null;
-  });
+  const [conversationId, setConversationId] = useState(null);
   const [activeFaqModal, setActiveFaqModal] = useState(null);
   const [escalationModalOpen, setEscalationModalOpen] = useState(false);
   const [escalationReason, setEscalationReason] = useState("");
@@ -103,7 +101,6 @@ export default function SupportAiAssistant({
 
       if (res?.conversation?.id) {
         setConversationId(res.conversation.id);
-        localStorage.setItem("easyx_support_ai_conv_id", res.conversation.id);
       }
 
       if (res?.rate_limited) {
@@ -118,7 +115,6 @@ export default function SupportAiAssistant({
 
   // Handle user starting new session
   const handleResetConversation = () => {
-    localStorage.removeItem("easyx_support_ai_conv_id");
     setConversationId(null);
     toast.success("Started a new AI support session.");
   };

@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { getSupabaseAdmin, isSupabaseAdminConfigured } from "./supabaseAdmin";
 
 export type SupportTicketStatus =
   | "OPEN"
@@ -631,8 +632,8 @@ export const DEFAULT_SEED_FAQS: SupportFaqArticle[] = [
   },
 ];
 
-const genTicketId = () => `tkt_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
-const genMessageId = () => `msg_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+const genTicketId = () => crypto.randomUUID();
+const genMessageId = () => crypto.randomUUID();
 const nowIso = () => new Date().toISOString();
 
 export function sanitizeFileName(name: string): string {
@@ -796,6 +797,111 @@ export class SupportManager {
     }
   }
 
+  public async initFromSupabase(): Promise<void> {
+    if (!isSupabaseAdminConfigured()) return;
+    try {
+      const adminClient = getSupabaseAdmin();
+
+      // 1. Load FAQs from Supabase support_faqs
+      const { data: faqs, error: faqsErr } = await adminClient.from("support_faqs").select("*");
+      if (!faqsErr && Array.isArray(faqs) && faqs.length > 0) {
+        this.db.support_faqs.clear();
+        for (const f of faqs) {
+          const normCat = normalizeFaqCategory(f.category);
+          const catDef = FAQ_CATEGORY_DEFINITIONS.find((c) => c.id === normCat);
+          this.db.support_faqs.set(f.id, {
+            id: f.id,
+            title: f.question,
+            question: f.question,
+            answer: f.answer,
+            category: normCat,
+            category_label: catDef?.label || normCat,
+            keywords: Array.isArray(f.keywords) ? f.keywords : [],
+            related_article_ids: [],
+            is_published: Boolean(f.is_active),
+            views_count: 0,
+            display_order: f.display_order || 1,
+            created_at: f.created_at,
+            updated_at: f.updated_at,
+            created_by: "System",
+          });
+        }
+      }
+
+      // 2. Load SLA config from Supabase platform_settings
+      const { data: slaRow } = await adminClient
+        .from("platform_settings")
+        .select("value")
+        .eq("key", "support_sla_config")
+        .maybeSingle();
+      if (slaRow?.value) {
+        this.db.support_sla_config = slaRow.value;
+      }
+
+      // 3. Load Support Tickets from Supabase
+      const { data: tickets, error: tktErr } = await adminClient.from("support_tickets").select("*");
+      if (!tktErr && Array.isArray(tickets)) {
+        for (const t of tickets) {
+          this.db.support_tickets.set(t.id, {
+            id: t.id,
+            user_id: t.user_id,
+            user_name: t.user_name || "User",
+            user_email: t.user_email || "",
+            subject: t.subject,
+            category: (t.category || "OTHER").toUpperCase(),
+            priority: (t.priority || "NORMAL").toUpperCase(),
+            status: (t.status || "OPEN").toUpperCase(),
+            assigned_admin_id: t.assigned_admin_id || null,
+            assigned_admin_name: null,
+            created_at: t.created_at,
+            updated_at: t.updated_at,
+            last_activity_at: t.updated_at,
+            first_admin_response_at: t.first_responded_at || null,
+            last_admin_response_at: null,
+            last_user_response_at: t.created_at,
+            resolved_at: t.resolved_at || null,
+            closed_at: null,
+            is_escalated: false,
+            escalation_level: 0,
+            escalated_at: null,
+            escalation_reason: null,
+            escalated_by: null,
+            first_response_due_at: t.first_response_due_at || null,
+            resolution_due_at: t.resolution_due_at || null,
+            attachments: [],
+            metadata: {},
+          });
+        }
+      }
+
+      // 4. Load Support Messages from Supabase
+      const { data: messages, error: msgErr } = await adminClient
+        .from("support_messages")
+        .select("*")
+        .order("created_at", { ascending: true });
+      if (!msgErr && Array.isArray(messages)) {
+        for (const m of messages) {
+          this.db.support_messages.set(m.id, {
+            id: m.id,
+            ticket_id: m.ticket_id,
+            sender_type: (m.sender_type || "USER").toUpperCase(),
+            sender_id: m.sender_id,
+            sender_name: m.sender_name || "Support",
+            message: m.message,
+            text: m.message,
+            attachments: Array.isArray(m.attachments) ? m.attachments : [],
+            is_internal_note: Boolean(m.is_internal_note),
+            read_by_user: true,
+            read_by_admin: true,
+            created_at: m.created_at,
+          });
+        }
+      }
+    } catch (err: any) {
+      console.warn("[SupportManager] Error loading support state from Supabase:", err?.message);
+    }
+  }
+
   /**
    * Get global SLA configuration
    */
@@ -820,6 +926,19 @@ export class SupportManager {
       },
     };
     this.db.support_sla_config = updated;
+
+    if (isSupabaseAdminConfigured()) {
+      const adminClient = getSupabaseAdmin();
+      adminClient.from("platform_settings").upsert({
+        key: "support_sla_config",
+        value: updated,
+        description: "Support SLA Configuration",
+        updated_at: new Date().toISOString(),
+      }).then(({ error }) => {
+        if (error) console.warn("[SupportManager] Error updating SLA config in Supabase:", error.message);
+      });
+    }
+
     return updated;
   }
 
@@ -1426,6 +1545,39 @@ export class SupportManager {
 
     this.db.support_messages.set(initialMsg.id, initialMsg);
 
+    if (isSupabaseAdminConfigured()) {
+      const adminClient = getSupabaseAdmin();
+      adminClient.from("support_tickets").insert({
+        id: ticket.id,
+        ticket_number: `TCK-${ticket.id.slice(0, 8).toUpperCase()}`,
+        user_id: ticket.user_id,
+        subject: ticket.subject,
+        category: ticket.category.toLowerCase(),
+        priority: ticket.priority.toLowerCase(),
+        status: ticket.status.toLowerCase(),
+        first_response_due_at: ticket.first_response_due_at,
+        resolution_due_at: ticket.resolution_due_at,
+        created_at: ticket.created_at,
+        updated_at: ticket.updated_at,
+      }).then(({ error }) => {
+        if (error) console.warn("[SupportManager] Error inserting ticket to Supabase:", error.message);
+      });
+
+      adminClient.from("support_messages").insert({
+        id: initialMsg.id,
+        ticket_id: ticket.id,
+        sender_type: "user",
+        sender_id: initialMsg.sender_id,
+        sender_name: initialMsg.sender_name,
+        message: initialMsg.message,
+        attachments: initialMsg.attachments || [],
+        is_internal_note: false,
+        created_at: initialMsg.created_at,
+      }).then(({ error }) => {
+        if (error) console.warn("[SupportManager] Error inserting initial message to Supabase:", error.message);
+      });
+    }
+
     // Record creation in timeline
     this.recordTimelineEvent({
       ticketId,
@@ -1593,6 +1745,30 @@ export class SupportManager {
     ticket.updated_at = ts;
     if (ticket.status === "WAITING_FOR_USER" || ticket.status === "RESOLVED") {
       ticket.status = "WAITING_FOR_ADMIN";
+    }
+
+    if (isSupabaseAdminConfigured()) {
+      const adminClient = getSupabaseAdmin();
+      adminClient.from("support_messages").insert({
+        id: msg.id,
+        ticket_id: ticketId,
+        sender_type: "user",
+        sender_id: userId,
+        sender_name: msg.sender_name,
+        message: msg.message,
+        attachments: msg.attachments || [],
+        is_internal_note: false,
+        created_at: ts,
+      }).then(({ error }) => {
+        if (error) console.warn("[SupportManager] Error inserting user message to Supabase:", error.message);
+      });
+
+      adminClient.from("support_tickets").update({
+        status: ticket.status.toLowerCase(),
+        updated_at: ts,
+      }).eq("id", ticketId).then(({ error }) => {
+        if (error) console.warn("[SupportManager] Error updating ticket in Supabase:", error.message);
+      });
     }
 
     // Record in timeline
@@ -2087,6 +2263,31 @@ export class SupportManager {
 
     this.db.support_messages.set(msg.id, msg);
 
+    if (isSupabaseAdminConfigured()) {
+      const adminClient = getSupabaseAdmin();
+      adminClient.from("support_messages").insert({
+        id: msg.id,
+        ticket_id: ticketId,
+        sender_type: "admin",
+        sender_id: adminId || null,
+        sender_name: msg.sender_name,
+        message: msg.message,
+        attachments: msg.attachments || [],
+        is_internal_note: false,
+        created_at: ts,
+      }).then(({ error }) => {
+        if (error) console.warn("[SupportManager] Error inserting admin reply to Supabase:", error.message);
+      });
+
+      adminClient.from("support_tickets").update({
+        status: (newStatus && SUPPORT_STATUSES.includes(newStatus) ? newStatus : "WAITING_FOR_USER").toLowerCase(),
+        first_responded_at: ticket.first_admin_response_at,
+        updated_at: ts,
+      }).eq("id", ticketId).then(({ error }) => {
+        if (error) console.warn("[SupportManager] Error updating ticket in Supabase:", error.message);
+      });
+    }
+
     // Also mark any prior user messages as read by admin
     for (const m of this.db.support_messages.values()) {
       if (m.ticket_id === ticketId && m.sender_type === "USER" && !m.is_read) {
@@ -2198,6 +2399,17 @@ export class SupportManager {
       attachments: [],
     };
     this.db.support_messages.set(sysMsg.id, sysMsg);
+
+    if (isSupabaseAdminConfigured()) {
+      const adminClient = getSupabaseAdmin();
+      adminClient.from("support_tickets").update({
+        status: status.toLowerCase(),
+        resolved_at: ticket.resolved_at,
+        updated_at: ts,
+      }).eq("id", ticketId).then(({ error }) => {
+        if (error) console.warn("[SupportManager] Error updating ticket status in Supabase:", error.message);
+      });
+    }
 
     // Calculate resolution duration if resolved
     let resolutionFmt: string | null = null;
@@ -2380,6 +2592,23 @@ export class SupportManager {
     };
 
     this.db.support_messages.set(msg.id, msg);
+
+    if (isSupabaseAdminConfigured()) {
+      const adminClient = getSupabaseAdmin();
+      adminClient.from("support_messages").insert({
+        id: msg.id,
+        ticket_id: ticketId,
+        sender_type: "admin",
+        sender_id: adminId,
+        sender_name: msg.sender_name,
+        message: msg.message,
+        attachments: msg.attachments || [],
+        is_internal_note: true,
+        created_at: ts,
+      }).then(({ error }) => {
+        if (error) console.warn("[SupportManager] Error inserting internal note to Supabase:", error.message);
+      });
+    }
 
     ticket.updated_at = ts;
     ticket.last_activity_at = ts;
@@ -2666,7 +2895,7 @@ export class SupportManager {
     const cat = normalizeFaqCategory(category);
     const catDef = FAQ_CATEGORY_DEFINITIONS.find((c) => c.id === cat);
     const ts = nowIso();
-    const id = `faq_${crypto.randomUUID().replace(/-/g, "").slice(0, 10)}`;
+    const id = crypto.randomUUID();
 
     const newFaq: SupportFaqArticle = {
       id,
@@ -2689,6 +2918,24 @@ export class SupportManager {
     };
 
     this.db.support_faqs.set(id, newFaq);
+
+    if (isSupabaseAdminConfigured()) {
+      const adminClient = getSupabaseAdmin();
+      adminClient.from("support_faqs").insert({
+        id,
+        category: cat.toLowerCase(),
+        question: newFaq.title || newFaq.question,
+        answer: newFaq.answer,
+        keywords: newFaq.keywords || [],
+        is_active: Boolean(newFaq.is_published),
+        display_order: newFaq.display_order,
+        created_at: ts,
+        updated_at: ts,
+      }).then(({ error }) => {
+        if (error) console.warn("[SupportManager] Error creating FAQ in Supabase:", error.message);
+      });
+    }
+
     return this.hydrateFaq(newFaq);
   }
 
@@ -2757,6 +3004,22 @@ export class SupportManager {
     }
 
     this.db.support_faqs.set(id, faq);
+
+    if (isSupabaseAdminConfigured()) {
+      const adminClient = getSupabaseAdmin();
+      adminClient.from("support_faqs").update({
+        category: faq.category.toLowerCase(),
+        question: faq.title || faq.question,
+        answer: faq.answer,
+        keywords: faq.keywords || [],
+        is_active: Boolean(faq.is_published),
+        display_order: faq.display_order,
+        updated_at: ts,
+      }).eq("id", id).then(({ error }) => {
+        if (error) console.warn("[SupportManager] Error updating FAQ in Supabase:", error.message);
+      });
+    }
+
     return this.hydrateFaq(faq);
   }
 
@@ -2776,6 +3039,17 @@ export class SupportManager {
     }
 
     this.db.support_faqs.set(id, faq);
+
+    if (isSupabaseAdminConfigured()) {
+      const adminClient = getSupabaseAdmin();
+      adminClient.from("support_faqs").update({
+        is_active: Boolean(newStatus),
+        updated_at: faq.updated_at,
+      }).eq("id", id).then(({ error }) => {
+        if (error) console.warn("[SupportManager] Error toggling FAQ in Supabase:", error.message);
+      });
+    }
+
     return this.hydrateFaq(faq);
   }
 
@@ -2787,7 +3061,16 @@ export class SupportManager {
     if (!this.db.support_faqs.has(id)) {
       throw new Error("FAQ article not found.");
     }
-    return this.db.support_faqs.delete(id);
+    const deleted = this.db.support_faqs.delete(id);
+
+    if (isSupabaseAdminConfigured()) {
+      const adminClient = getSupabaseAdmin();
+      adminClient.from("support_faqs").delete().eq("id", id).then(({ error }) => {
+        if (error) console.warn("[SupportManager] Error deleting FAQ in Supabase:", error.message);
+      });
+    }
+
+    return deleted;
   }
 
   /**

@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { GoogleGenAI } from "@google/genai";
+import { getSupabaseAdmin, isSupabaseAdminConfigured } from "./supabaseAdmin";
 import {
   type SupportFaqArticle,
   type SupportManager,
@@ -175,6 +176,85 @@ export class SupportAiService {
     this.initGeminiClient();
   }
 
+  public async initFromSupabase(): Promise<void> {
+    if (!isSupabaseAdminConfigured()) return;
+    try {
+      const adminClient = getSupabaseAdmin();
+
+      // 1. Settings
+      const { data: settingsRow } = await adminClient
+        .from("platform_settings")
+        .select("value")
+        .eq("key", "support_ai_settings")
+        .maybeSingle();
+      if (settingsRow?.value) {
+        this.db.support_ai_settings = { ...DEFAULT_AI_SETTINGS, ...settingsRow.value };
+      }
+
+      // 2. Unanswered
+      const { data: unansRow } = await adminClient
+        .from("platform_settings")
+        .select("value")
+        .eq("key", "support_ai_unanswered")
+        .maybeSingle();
+      if (unansRow?.value && Array.isArray(unansRow.value)) {
+        for (const item of unansRow.value) {
+          if (item?.id) this.db.support_ai_unanswered.set(item.id, item);
+        }
+      }
+
+      // 3. Conversations
+      const { data: convRows } = await adminClient
+        .from("platform_settings")
+        .select("value")
+        .like("key", "support_ai_conv:%");
+      if (convRows && Array.isArray(convRows)) {
+        for (const row of convRows) {
+          if (row.value?.id) {
+            this.db.support_ai_conversations.set(row.value.id, row.value);
+          }
+        }
+      }
+    } catch (err: any) {
+      console.warn("[SupportAiService] Error initializing AI state from Supabase:", err?.message);
+    }
+  }
+
+  public persistConversation(conv: SupportAiConversation) {
+    if (!isSupabaseAdminConfigured()) return;
+    try {
+      const adminClient = getSupabaseAdmin();
+      adminClient.from("platform_settings").upsert({
+        key: `support_ai_conv:${conv.id}`,
+        value: conv,
+        description: `Support AI Conversation ${conv.id}`,
+        updated_at: new Date().toISOString(),
+      }).then(({ error }) => {
+        if (error) console.warn("[SupportAiService] Error persisting conversation to Supabase:", error.message);
+      });
+    } catch (err: any) {
+      console.warn("[SupportAiService] Error persisting conversation to Supabase:", err?.message);
+    }
+  }
+
+  public persistUnanswered() {
+    if (!isSupabaseAdminConfigured()) return;
+    try {
+      const adminClient = getSupabaseAdmin();
+      const list = Array.from(this.db.support_ai_unanswered.values());
+      adminClient.from("platform_settings").upsert({
+        key: "support_ai_unanswered",
+        value: list,
+        description: "Support AI Unanswered Questions",
+        updated_at: new Date().toISOString(),
+      }).then(({ error }) => {
+        if (error) console.warn("[SupportAiService] Error persisting unanswered questions to Supabase:", error.message);
+      });
+    } catch (err: any) {
+      console.warn("[SupportAiService] Error persisting unanswered questions to Supabase:", err?.message);
+    }
+  }
+
   private initGeminiClient() {
     const apiKey = process.env.GEMINI_API_KEY;
     if (apiKey) {
@@ -216,6 +296,18 @@ export class SupportAiService {
     };
 
     this.db.support_ai_settings = updated;
+
+    if (isSupabaseAdminConfigured()) {
+      const adminClient = getSupabaseAdmin();
+      adminClient.from("platform_settings").upsert({
+        key: "support_ai_settings",
+        value: updated,
+        description: "Support AI Settings",
+        updated_at: new Date().toISOString(),
+      }).then(({ error }) => {
+        if (error) console.warn("[SupportAiService] Error updating settings in Supabase:", error.message);
+      });
+    }
 
     // Recheck Gemini client if API key or settings changed
     this.initGeminiClient();
@@ -280,6 +372,7 @@ export class SupportAiService {
     };
 
     this.db.support_ai_conversations.set(newId, conversation);
+    this.persistConversation(conversation);
     return conversation;
   }
 
@@ -477,6 +570,8 @@ export class SupportAiService {
 
     conv.messages.push(aiMsg);
     conv.updated_at = new Date().toISOString();
+
+    this.persistConversation(conv);
 
     return {
       conversation: conv,
@@ -804,6 +899,7 @@ Provide your helpful response based strictly on the approved EasyX knowledge bas
       ],
     };
     conv.messages.push(systemEscalateMsg);
+    this.persistConversation(conv);
 
     return {
       conversation: conv,
@@ -825,6 +921,7 @@ Provide your helpful response based strictly on the approved EasyX knowledge bas
 
     msg.feedback = feedback;
     conv.updated_at = new Date().toISOString();
+    this.persistConversation(conv);
     return true;
   }
 
@@ -856,6 +953,7 @@ Provide your helpful response based strictly on the approved EasyX knowledge bas
         status: "PENDING",
       });
     }
+    this.persistUnanswered();
   }
 
   getUnansweredQuestions(params: { status?: string; limit?: number } = {}) {
@@ -880,6 +978,7 @@ Provide your helpful response based strictly on the approved EasyX knowledge bas
     if (resolvedFaqId) {
       record.resolved_with_faq_id = resolvedFaqId;
     }
+    this.persistUnanswered();
     return record;
   }
 
