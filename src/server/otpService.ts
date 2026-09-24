@@ -256,8 +256,9 @@ export class OtpService {
     this.updateRateLimit(params.purpose, rateLimitId);
 
     // Dispatch email based on purpose
+    let dispatchResult: any = null;
     if (params.purpose === "SIGNUP") {
-      await emailService.sendEmailVerification({
+      dispatchResult = await emailService.sendEmailVerification({
         to: cleanEmail,
         name: params.userName,
         code: plainOtp,
@@ -266,7 +267,7 @@ export class OtpService {
         expiresInMinutes: Math.round(expiresInSeconds / 60),
       });
     } else if (params.purpose === "FORGOT_PASSWORD") {
-      await emailService.sendPasswordResetEmail({
+      dispatchResult = await emailService.sendPasswordResetEmail({
         to: cleanEmail,
         code: plainOtp,
         token,
@@ -274,7 +275,7 @@ export class OtpService {
         expiresInMinutes: Math.round(expiresInSeconds / 60),
       });
     } else if (params.purpose === "WITHDRAWAL") {
-      await emailService.sendWithdrawalOtpEmail({
+      dispatchResult = await emailService.sendWithdrawalOtpEmail({
         to: cleanEmail,
         name: params.userName,
         code: plainOtp,
@@ -283,6 +284,11 @@ export class OtpService {
         toAddress: params.metadata?.toAddress || "",
         expiresInMinutes: Math.round(expiresInSeconds / 60),
       });
+    }
+
+    if (dispatchResult && dispatchResult.success === false) {
+      await this.deleteSession(params.purpose, rateLimitId);
+      throw new Error("We couldn't send the verification email right now. Please try again.");
     }
 
     return {
@@ -325,79 +331,84 @@ export class OtpService {
       throw new Error("Maximum verification attempts exceeded. Please request a new verification code.");
     }
 
-    // If verifying via secure 1-click token
-    if (params.token && session.token && params.token.trim() === session.token) {
+    const cleanCode = (params.code || "").trim().replace(/\D/g, "");
+
+    // If an OTP code was supplied, or if no token was supplied:
+    // ALWAYS require and perform cryptographic 6-digit code verification.
+    // A token must NEVER override or bypass an incorrect or supplied OTP code.
+    if (cleanCode || !params.token) {
+      if (!cleanCode || cleanCode.length !== 6) {
+        throw new Error("Please enter a valid 6-digit verification code.");
+      }
+
+      // Verify withdrawal metadata consistency (amount, network, address)
+      if (params.purpose === "WITHDRAWAL" && params.metadata && session.metadata) {
+        if (
+          params.metadata.amount !== undefined &&
+          Math.abs(Number(session.metadata.amount) - Number(params.metadata.amount)) > 0.0001
+        ) {
+          await this.deleteSession(params.purpose, identifier);
+          throw new Error("Withdrawal amount mismatch from authorization session. Please request a new code.");
+        }
+
+        if (
+          params.metadata.network &&
+          session.metadata.network &&
+          String(session.metadata.network).toUpperCase() !== String(params.metadata.network).toUpperCase()
+        ) {
+          await this.deleteSession(params.purpose, identifier);
+          throw new Error("Withdrawal network mismatch from authorization session. Please request a new code.");
+        }
+
+        if (
+          params.metadata.toAddress &&
+          session.metadata.toAddress &&
+          String(session.metadata.toAddress).toLowerCase() !== String(params.metadata.toAddress).toLowerCase()
+        ) {
+          await this.deleteSession(params.purpose, identifier);
+          throw new Error("Destination wallet address mismatch from authorization session. Please request a new code.");
+        }
+      }
+
+      // Timing-safe hash comparison
+      const candidateHash = crypto.createHash("sha256").update(session.salt + cleanCode).digest("hex");
+      let isMatch = false;
+      try {
+        isMatch = crypto.timingSafeEqual(
+          Buffer.from(candidateHash, "hex"),
+          Buffer.from(session.otpHash, "hex")
+        );
+      } catch {
+        isMatch = false;
+      }
+
+      if (!isMatch) {
+        session.attempts++;
+        session.updatedAt = now;
+        const remaining = session.maxAttempts - session.attempts;
+        if (remaining <= 0) {
+          await this.deleteSession(params.purpose, identifier);
+          throw new Error("Incorrect verification code. Maximum attempts exceeded. Please request a new code.");
+        }
+        await this.persistSession(session);
+        throw new Error(`Incorrect verification code. ${remaining} attempt${remaining === 1 ? "" : "s"} remaining.`);
+      }
+
+      // Code verified successfully
+      session.verified = true;
+      session.updatedAt = now;
+      await this.persistSession(session);
+
+      return { verified: true, session, token: session.token || "" };
+    } else if (params.token && session.token && params.token.trim() === session.token) {
+      // 1-click token verification ONLY when NO manual OTP code was supplied
       session.verified = true;
       session.updatedAt = now;
       await this.persistSession(session);
       return { verified: true, session, token: session.token };
-    }
-
-    // Verify via 6-digit code
-    const cleanCode = (params.code || "").trim().replace(/\D/g, "");
-    if (!cleanCode || cleanCode.length !== 6) {
+    } else {
       throw new Error("Please enter a valid 6-digit verification code.");
     }
-
-    // Verify withdrawal metadata consistency (amount, network, address)
-    if (params.purpose === "WITHDRAWAL" && params.metadata && session.metadata) {
-      if (
-        params.metadata.amount !== undefined &&
-        Math.abs(Number(session.metadata.amount) - Number(params.metadata.amount)) > 0.0001
-      ) {
-        await this.deleteSession(params.purpose, identifier);
-        throw new Error("Withdrawal amount mismatch from authorization session. Please request a new code.");
-      }
-
-      if (
-        params.metadata.network &&
-        session.metadata.network &&
-        String(session.metadata.network).toUpperCase() !== String(params.metadata.network).toUpperCase()
-      ) {
-        await this.deleteSession(params.purpose, identifier);
-        throw new Error("Withdrawal network mismatch from authorization session. Please request a new code.");
-      }
-
-      if (
-        params.metadata.toAddress &&
-        session.metadata.toAddress &&
-        String(session.metadata.toAddress).toLowerCase() !== String(params.metadata.toAddress).toLowerCase()
-      ) {
-        await this.deleteSession(params.purpose, identifier);
-        throw new Error("Destination wallet address mismatch from authorization session. Please request a new code.");
-      }
-    }
-
-    // Timing-safe hash comparison
-    const candidateHash = crypto.createHash("sha256").update(session.salt + cleanCode).digest("hex");
-    let isMatch = false;
-    try {
-      isMatch = crypto.timingSafeEqual(
-        Buffer.from(candidateHash, "hex"),
-        Buffer.from(session.otpHash, "hex")
-      );
-    } catch {
-      isMatch = false;
-    }
-
-    if (!isMatch) {
-      session.attempts++;
-      session.updatedAt = now;
-      const remaining = session.maxAttempts - session.attempts;
-      if (remaining <= 0) {
-        await this.deleteSession(params.purpose, identifier);
-        throw new Error("Incorrect verification code. Maximum attempts exceeded. Please request a new code.");
-      }
-      await this.persistSession(session);
-      throw new Error(`Incorrect verification code. ${remaining} attempt${remaining === 1 ? "" : "s"} remaining.`);
-    }
-
-    // Code verified successfully
-    session.verified = true;
-    session.updatedAt = now;
-    await this.persistSession(session);
-
-    return { verified: true, session, token: session.token || "" };
   }
 
   /**
@@ -411,13 +422,14 @@ export class OtpService {
    * Verifies if an active verified token exists for completing an action (e.g. password reset)
    */
   public async validateVerifiedToken(purpose: OtpPurpose, identifier: string, token?: string): Promise<boolean> {
+    if (!token || !token.trim()) return false;
     const session = await this.loadSession(purpose, identifier);
     if (!session || !session.verified || session.used) return false;
     if (Date.now() > session.expiresAt) {
       await this.deleteSession(purpose, identifier);
       return false;
     }
-    if (token && session.token && token.trim() !== session.token) {
+    if (!session.token || token.trim() !== session.token) {
       return false;
     }
     return true;

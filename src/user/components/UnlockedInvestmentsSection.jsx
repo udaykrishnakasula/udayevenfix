@@ -33,6 +33,7 @@ const UnlockedCardItem = React.memo(function UnlockedCardItem({
   userName,
 }) {
   const [mounted, setMounted] = React.useState(false);
+  const [tick, setTick] = React.useState(0);
 
   React.useEffect(() => {
     const timer = setTimeout(() => {
@@ -41,8 +42,44 @@ const UnlockedCardItem = React.memo(function UnlockedCardItem({
     return () => clearTimeout(timer);
   }, []);
 
+  React.useEffect(() => {
+    const interval = setInterval(() => {
+      setTick((t) => t + 1);
+    }, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
   const planKey = inv.plan_key || "silver";
   const invIdShort = inv.id ? inv.id.slice(-6).toUpperCase() : "";
+
+  const lockRemainingText = useMemo(() => {
+    if (inv?.status === "matured") {
+      return "Matured";
+    }
+    if (!inv?.maturity_at) {
+      return "—";
+    }
+    const maturityDate = dayjs(inv.maturity_at);
+    if (!maturityDate.isValid()) {
+      return "—";
+    }
+
+    const now = dayjs();
+    const diffMs = maturityDate.valueOf() - now.valueOf();
+
+    if (diffMs <= 0) {
+      return "0 days left";
+    }
+
+    const remainingDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+    if (remainingDays <= 0) {
+      return "0 days left";
+    }
+    if (remainingDays === 1) {
+      return "1 day left";
+    }
+    return `${remainingDays} days left`;
+  }, [inv?.status, inv?.maturity_at, tick]);
 
   return (
     <div
@@ -134,9 +171,7 @@ const UnlockedCardItem = React.memo(function UnlockedCardItem({
               <span>Lock Remaining</span>
             </div>
             <div className="mt-1 font-medium text-white/90">
-              {inv.status === "matured"
-                ? "Matured"
-                : `${inv.remaining_days ?? "—"} days left`}
+              {lockRemainingText}
             </div>
           </div>
         </div>

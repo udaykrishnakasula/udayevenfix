@@ -63,6 +63,7 @@ import {
   useApproveKyc,
   useRejectKyc,
   fetchAdminKycDocUrl,
+  getAuthenticatedProofUrl,
   useAdminWalletTransactions,
   useAdminAdjustWallet,
   useAdminReferrals,
@@ -135,12 +136,18 @@ function KycPill({ status }) {
   );
 }
 
-function KycDocItem({ docId, docType, onExpand }) {
-  const [url, setUrl] = useState(null);
+function KycDocItem({ docId, directUrl, docType, onExpand }) {
+  const [url, setUrl] = useState(directUrl || null);
   const [err, setErr] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!directUrl);
 
   React.useEffect(() => {
+    if (directUrl) {
+      setUrl(directUrl);
+      setLoading(false);
+      setErr(false);
+      return;
+    }
     let active = true;
     if (!docId) {
       setLoading(false);
@@ -162,7 +169,7 @@ function KycDocItem({ docId, docType, onExpand }) {
     return () => {
       active = false;
     };
-  }, [docId]);
+  }, [docId, directUrl]);
 
   const labelMap = {
     id_front: "ID Document (Front)",
@@ -1063,6 +1070,7 @@ export function User360ViewModal({ user: initialUser, open, onClose, onUserUpdat
                         <KycDocItem
                           key={doc.id}
                           docId={doc.id}
+                          directUrl={doc.url}
                           docType={doc.doc_type}
                           onExpand={(url, label) => setZoomModal({ open: true, url, title: label })}
                         />
@@ -1177,7 +1185,7 @@ export function User360ViewModal({ user: initialUser, open, onClose, onUserUpdat
                 note="This user has not submitted any crypto deposit transactions yet."
               />
             ) : (
-              <EasyXTable columns={["Deposit ID", "Network", "Submitted", "Approved Amt", "Tx Hash", "Status", "Actions"]}>
+              <EasyXTable columns={["Deposit ID", "Network", "Submitted", "Approved Amt", "Tx Hash", "Proof", "Status", "Actions"]}>
                 {userDeposits.map((dep) => (
                   <tr key={dep.id} className="hover:bg-white/[0.02] transition">
                     <td className="px-4 py-3 font-mono text-xs text-ex-text">
@@ -1194,6 +1202,28 @@ export function User360ViewModal({ user: initialUser, open, onClose, onUserUpdat
                         <span title={dep.tx_hash}>{dep.tx_hash.slice(0, 10)}...</span>
                       ) : (
                         "No Hash"
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      {dep.proof_images && dep.proof_images.length > 0 ? (
+                        <div className="flex items-center gap-1.5">
+                          {dep.proof_images.map((img, pIdx) => {
+                            const displayUrl = getAuthenticatedProofUrl(img);
+                            return (
+                              <button
+                                key={pIdx}
+                                type="button"
+                                onClick={() => setZoomModal({ open: true, url: displayUrl, title: `Deposit Proof #${pIdx + 1} (${money(dep.amount)} USDT)` })}
+                                className="h-8 w-8 rounded overflow-hidden border border-white/20 bg-black/40 hover:border-ex-lav-400 transition shrink-0 group relative"
+                                title={`View Proof #${pIdx + 1}`}
+                              >
+                                <img src={displayUrl} alt={`Proof ${pIdx + 1}`} className="h-full w-full object-cover group-hover:scale-110 transition" />
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <span className="text-[11px] text-ex-muted italic">None</span>
                       )}
                     </td>
                     <td className="px-4 py-3">

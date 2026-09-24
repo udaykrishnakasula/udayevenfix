@@ -1930,11 +1930,17 @@ export class SupabaseDbService {
 
   public async serializeDeposit(dep: any): Promise<any> {
     const paths = (dep.proof_file_url || "").split(",").map((s: string) => s.trim()).filter(Boolean);
-    const proofUrls: string[] = [];
-    for (const p of paths) {
-      const signed = await this.getDepositProofSignedUrl(p);
-      if (signed) proofUrls.push(signed);
+    const proofEndpoints: string[] = [];
+    const proofSignedUrls: string[] = [];
+    for (let i = 0; i < paths.length; i++) {
+      if (dep.id) {
+        proofEndpoints.push(`/api/deposits/proof/${dep.id}?index=${i}`);
+      }
+      const signed = await this.getDepositProofSignedUrl(paths[i]);
+      if (signed) proofSignedUrls.push(signed);
     }
+
+    const proofList = proofEndpoints.length > 0 ? proofEndpoints : proofSignedUrls;
 
     return {
       id: dep.id,
@@ -1944,8 +1950,9 @@ export class SupabaseDbService {
       approved_amount: dep.approved_amount ? fmt(dep.approved_amount) : null,
       to_address: dep.to_address,
       tx_hash: dep.tx_hash,
-      proof_images: proofUrls,
-      proof_file_url: proofUrls[0] || null,
+      proof_images: proofList,
+      proof_signed_urls: proofSignedUrls,
+      proof_file_url: proofList[0] || null,
       status: dep.status,
       admin_note: dep.admin_note,
       decided_by: dep.decided_by,

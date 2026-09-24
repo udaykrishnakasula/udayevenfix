@@ -58,7 +58,7 @@ export default function AdminAiAssistantManager({ onNavigateToFaqs }) {
   const updateSettingsMutation = useAdminUpdateSupportAiSettings();
 
   const [formIsEnabled, setFormIsEnabled] = useState(true);
-  const [formModelName, setFormModelName] = useState("gemini-3.7-flash");
+  const [formModelName, setFormModelName] = useState("gemini-3.1-flash-lite");
   const [formTemperature, setFormTemperature] = useState(0.2);
   const [formRateLimit, setFormRateLimit] = useState(30);
   const [formWelcomeMessage, setFormWelcomeMessage] = useState("");
@@ -70,7 +70,7 @@ export default function AdminAiAssistantManager({ onNavigateToFaqs }) {
   if (settingsData?.settings && !settingsLoaded) {
     const s = settingsData.settings;
     setFormIsEnabled(Boolean(s.is_enabled));
-    setFormModelName(s.model_name || "gemini-3.7-flash");
+    setFormModelName(s.model_name === "gemini-3.7-flash" ? "gemini-3.1-flash-lite" : (s.model_name || "gemini-3.1-flash-lite"));
     setFormTemperature(s.temperature !== undefined ? s.temperature : 0.2);
     setFormRateLimit(s.rate_limit_per_10min || 30);
     setFormWelcomeMessage(s.welcome_message || "");
@@ -248,8 +248,8 @@ export default function AdminAiAssistantManager({ onNavigateToFaqs }) {
             <span>Model Engine</span>
             <Bot className="h-3.5 w-3.5 text-ex-lav-400" />
           </div>
-          <p className="text-xs font-bold text-ex-text mt-2 truncate" title={analytics.model_name || "gemini-3.7-flash"}>
-            {analytics.model_name || "gemini-3.7-flash"}
+          <p className="text-xs font-bold text-ex-text mt-2 truncate" title={analytics.model_name || "gemini-3.1-flash-lite"}>
+            {analytics.model_name || "gemini-3.1-flash-lite"}
           </p>
           <span className="text-[10px] text-emerald-400 mt-1">Grounded GenAI</span>
         </EasyXCard>
@@ -343,9 +343,9 @@ export default function AdminAiAssistantManager({ onNavigateToFaqs }) {
                   onChange={(e) => setFormModelName(e.target.value)}
                   className="w-full h-10 rounded-ex-ctrl bg-white/5 border border-white/10 px-3 text-xs text-ex-text focus:border-ex-lav-400 focus:outline-none"
                 >
-                  <option value="gemini-3.7-flash">Gemini 3.7 Flash (Default - Recommended)</option>
-                  <option value="gemini-flash-latest">Gemini Flash Latest</option>
-                  <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro Preview</option>
+                  <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite (Fast & Reliable - Recommended)</option>
+                  <option value="gemini-3.8-flash">Gemini 3.8 Flash (General Tasks)</option>
+                  <option value="gemini-3.1-pro-preview">Gemini 3.1 Pro Preview (Complex Reasoning)</option>
                 </select>
               </div>
 

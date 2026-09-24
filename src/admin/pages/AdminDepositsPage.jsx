@@ -35,6 +35,7 @@ import {
   useRejectDeposit,
   useBatchApproveDeposits,
   useBatchRejectDeposits,
+  getAuthenticatedProofUrl,
 } from "@/admin/adminApi";
 import { money } from "@/user/api";
 import { apiError } from "@/shared/lib/api";
@@ -83,6 +84,7 @@ function StatusBadge({ status }) {
 
 function DepositProofThumb({ img, idx, title, onOpen, className = "h-14 w-20" }) {
   const [hasError, setHasError] = useState(false);
+  const displayUrl = useMemo(() => getAuthenticatedProofUrl(img), [img]);
 
   const handleImageError = (e) => {
     console.error(
@@ -97,7 +99,7 @@ function DepositProofThumb({ img, idx, title, onOpen, className = "h-14 w-20" })
   return (
     <button
       type="button"
-      onClick={() => onOpen(img, title)}
+      onClick={() => onOpen(displayUrl, title)}
       className={`group relative rounded border border-white/20 bg-black/50 overflow-hidden hover:border-ex-accent transition ${className}`}
       title={`Click to inspect proof #${idx + 1}`}
     >
@@ -108,7 +110,7 @@ function DepositProofThumb({ img, idx, title, onOpen, className = "h-14 w-20" })
         </div>
       ) : (
         <img
-          src={img}
+          src={displayUrl}
           alt={`Proof ${idx + 1}`}
           onError={handleImageError}
           className="h-full w-full object-cover group-hover:scale-105 transition duration-200"

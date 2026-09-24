@@ -26,15 +26,15 @@ class EmailService {
 
   private getFromAddress(): string {
     if (process.env.RESEND_FROM) {
-      return process.env.RESEND_FROM;
+      return process.env.RESEND_FROM.replace(/@easxy\.in/gi, "@easyx.in");
     }
     if (process.env.EMAIL_FROM && !process.env.EMAIL_FROM.includes("easyx.io")) {
-      return process.env.EMAIL_FROM;
+      return process.env.EMAIL_FROM.replace(/@easxy\.in/gi, "@easyx.in");
     }
     if (process.env.SMTP_FROM && !process.env.SMTP_FROM.includes("easyx.io")) {
-      return process.env.SMTP_FROM;
+      return process.env.SMTP_FROM.replace(/@easxy\.in/gi, "@easyx.in");
     }
-    return "EasyX <no-reply@easxy.in>";
+    return "EasyX <no-reply@easyx.in>";
   }
 
   public getAppUrl(requestOrigin?: string): string {
@@ -60,8 +60,9 @@ class EmailService {
 
     // 1. Resend REST API integration (Zero dependencies)
     if (provider === "resend" && process.env.RESEND_API_KEY) {
+      const sender = from;
+      const recipientDomain = cleanTo.includes("@") ? cleanTo.split("@")[1] : "unknown";
       try {
-        const sender = from;
         const response = await fetch("https://api.resend.com/emails", {
           method: "POST",
           headers: {
@@ -79,64 +80,54 @@ class EmailService {
 
         if (response.ok) {
           const data = (await response.json()) as any;
-          console.log(`[EasyX Email] Delivered via Resend to ${cleanTo} (ID: ${data.id})`);
+          console.log(
+            `[EasyX Email] Delivered via Resend (Status: ${response.status}, ID: ${data?.id}, Sender: ${sender}, RecipientDomain: @${recipientDomain})`
+          );
           return { success: true, messageId: data.id, provider: "resend" };
         }
 
-        const errText = await response.text();
+        const rawText = await response.text();
+        let parsedErrorName = "resend_error";
+        let parsedErrorMessage = rawText;
 
-        // Check if error is due to unverified custom sender domain (e.g. easxy.in) or sandbox recipient restriction
-        const isDomainOrSandboxRestriction =
-          response.status === 403 ||
-          response.status === 422 ||
-          errText.includes("not authorized to send emails from") ||
-          errText.includes("validation_error") ||
-          errText.includes("testing email address") ||
-          errText.includes("domain");
-
-        if (isDomainOrSandboxRestriction) {
-          // Attempt sandbox fallback using Resend's default test onboarding address
-          if (!sender.includes("onboarding@resend.dev")) {
-            try {
-              const fallbackResponse = await fetch("https://api.resend.com/emails", {
-                method: "POST",
-                headers: {
-                  Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
-                  "Content-Type": "application/json",
-                },
-                body: JSON.stringify({
-                  from: "onboarding@resend.dev",
-                  to: [cleanTo],
-                  subject: options.subject,
-                  html: options.html,
-                  text: options.text || options.html.replace(/<[^>]*>?/gm, ""),
-                }),
-              });
-
-              if (fallbackResponse.ok) {
-                const fbData = (await fallbackResponse.json()) as any;
-                console.log(`[EasyX Email] Delivered via Resend onboarding sandbox to ${cleanTo} (ID: ${fbData.id})`);
-                return { success: true, messageId: fbData.id, provider: "resend" };
-              }
-            } catch {
-              // Ignore fallback network errors
-            }
-          }
-
-          // In preview/development or when domain is pending DNS verification on resend.com:
-          // Log informative notice with console.warn (never throwing fatal error) and gracefully deliver via safe mock
-          console.warn(
-            `[EasyX Email] Domain Verification Notice: '${sender}' is not yet verified in your Resend account (resend.com/domains). ` +
-            `Dispatched via simulated secure delivery so user OTP and authentication flows remain 100% active.`
-          );
-          return this.deliverMockEmail(cleanTo, sender, options, "resend_unverified_domain_safe_fallback");
+        try {
+          const parsedJson = JSON.parse(rawText);
+          if (parsedJson?.name) parsedErrorName = String(parsedJson.name);
+          if (parsedJson?.message) parsedErrorMessage = String(parsedJson.message);
+        } catch {
+          // Keep raw text as error message if not json
         }
 
-        console.warn(`[EasyX Email] Resend delivery notice (${response.status}):`, errText);
-        return this.deliverMockEmail(cleanTo, sender, options, "resend_api_fallback");
+        console.error(
+          `[EasyX Email] Resend API dispatch failure:\n` +
+          `  provider: resend\n` +
+          `  http_status: ${response.status}\n` +
+          `  error_name: ${parsedErrorName}\n` +
+          `  error_message: ${parsedErrorMessage}\n` +
+          `  sender: ${sender}\n` +
+          `  recipient_domain: @${recipientDomain}\n` +
+          `  timestamp: ${new Date().toISOString()}`
+        );
+
+        return {
+          success: false,
+          provider: "resend",
+          error: `Email delivery failed (${response.status}: ${parsedErrorMessage})`,
+        };
       } catch (err: any) {
-        console.warn("[EasyX Email] Resend network issue, falling back to local delivery:", err?.message);
-        return this.deliverMockEmail(cleanTo, from, options, "resend_network_safe_fallback");
+        console.error(
+          `[EasyX Email] Resend network dispatch exception:\n` +
+          `  provider: resend\n` +
+          `  error_message: ${err?.message || "Network error"}\n` +
+          `  sender: ${sender}\n` +
+          `  recipient_domain: @${recipientDomain}\n` +
+          `  timestamp: ${new Date().toISOString()}`
+        );
+        return {
+          success: false,
+          provider: "resend",
+          error: err?.message || "Network error connecting to email provider",
+        };
       }
     }
 

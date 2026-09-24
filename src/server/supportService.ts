@@ -1358,6 +1358,19 @@ export class SupportManager {
         }
         record.ticket_id = ticketId;
         record.message_id = messageId;
+        if (isSupabaseAdminConfigured()) {
+          const adminClient = getSupabaseAdmin();
+          Promise.resolve(
+            adminClient
+              .from("support_attachments")
+              .update({ ticket_id: ticketId, message_id: messageId })
+              .eq("id", record.id)
+          )
+            .then(({ error }: any) => {
+              if (error) console.warn("[Support] Failed to update attachment record in Supabase:", error.message);
+            })
+            .catch(() => {});
+        }
         resolved.push({
           id: record.id,
           ticket_id: ticketId,

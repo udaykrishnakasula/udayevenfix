@@ -14,6 +14,7 @@ import {
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Label } from "@/shared/ui/label";
+import { SixDigitOtpInput } from "@/shared/ui/input-otp";
 import { api, apiError } from "@/shared/lib/api";
 import { useAuth } from "@/shared/context/AuthContext";
 import AuthLayout from "./AuthLayout";
@@ -29,6 +30,7 @@ export default function VerifyEmailPage() {
   const [resending, setResending] = useState(false);
   const [verified, setVerified] = useState(false);
   const [cooldown, setCooldown] = useState(0);
+  const [verifyError, setVerifyError] = useState("");
 
   // Initialize from search params
   useEffect(() => {
@@ -72,21 +74,25 @@ export default function VerifyEmailPage() {
     }
   };
 
-  const handleManualVerify = async (e) => {
-    e.preventDefault();
+  const handleManualVerify = async (e, overrideCode) => {
+    if (e && typeof e.preventDefault === "function") e.preventDefault();
+    if (verifying) return;
+
     const cleanEmail = email.trim().toLowerCase();
-    const cleanCode = code.trim();
+    const candidateCode = typeof overrideCode === "string" ? overrideCode : (typeof e === "string" ? e : code);
+    const cleanCode = candidateCode.trim().replace(/\D/g, "").slice(0, 6);
 
     if (!cleanEmail) {
       toast.error("Please enter your email address.");
       return;
     }
-    if (!cleanCode) {
-      toast.error("Please enter the 6-digit verification code.");
+    if (!cleanCode || cleanCode.length < 6) {
+      toast.error("Please enter the complete 6-digit verification code.");
       return;
     }
 
     setVerifying(true);
+    setVerifyError("");
     try {
       const { data } = await api.post("/auth/verify-email", {
         email: cleanEmail,
@@ -96,7 +102,9 @@ export default function VerifyEmailPage() {
       toast.success(data.message || "Email verified successfully!");
       if (refreshUser) refreshUser();
     } catch (err) {
-      toast.error(apiError(err, "Invalid or expired verification code."));
+      const msg = apiError(err, "Invalid or expired verification code.");
+      setVerifyError(msg);
+      toast.error(msg);
     } finally {
       setVerifying(false);
     }
@@ -182,32 +190,50 @@ export default function VerifyEmailPage() {
             </div>
           </div>
 
-          <div className="space-y-1.5">
-            <Label htmlFor="code" className="text-white/80">6-Digit Verification Code</Label>
-            <div className="relative">
-              <ShieldCheck className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-white/40" />
-              <Input
-                id="code"
-                type="text"
-                placeholder="123456"
-                maxLength={6}
-                value={code}
-                onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))}
-                className="pl-9 bg-white/5 border-white/15 text-white placeholder:text-white/30 text-center tracking-[0.3em] font-mono text-base font-bold"
-                required
-              />
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <Label htmlFor="verify-email-code" className="text-white/90 text-xs font-semibold flex items-center gap-1.5 uppercase tracking-wider">
+                <ShieldCheck className="h-3.5 w-3.5 text-purple-400" />
+                6-Digit Verification Code
+              </Label>
             </div>
+
+            <SixDigitOtpInput
+              id="verify-email-code"
+              value={code}
+              onChange={(val) => {
+                const clean = val.replace(/\D/g, "").slice(0, 6);
+                if (verifyError) setVerifyError("");
+                setCode(clean);
+              }}
+              onComplete={(val) => {
+                if (!verifying) {
+                  handleManualVerify(undefined, val);
+                }
+              }}
+              disabled={verifying}
+              isError={Boolean(verifyError)}
+              autoFocus
+              dataTestId="verify-email-code-input"
+            />
+
+            {verifyError && (
+              <div className="flex items-center justify-center gap-1.5 text-xs text-rose-400 font-medium p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/20 animate-shake">
+                <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                <span>{verifyError}</span>
+              </div>
+            )}
           </div>
 
           <Button
             type="submit"
-            disabled={verifying}
-            className="w-full bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-medium py-2.5 rounded-xl shadow-lg shadow-purple-600/20 flex items-center justify-center gap-2"
+            disabled={verifying || code.length < 6}
+            className="w-full bg-gradient-to-r from-purple-600 via-indigo-600 to-purple-600 hover:from-purple-500 hover:via-indigo-500 hover:to-purple-500 text-white font-semibold py-3 rounded-full shadow-lg shadow-purple-600/25 active:scale-[0.99] transition-all flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {verifying ? (
               <>
                 <Loader2 className="h-4 w-4 animate-spin" />
-                <span>Verifying...</span>
+                <span>Verifying Code...</span>
               </>
             ) : (
               <span>Confirm Verification</span>
@@ -219,14 +245,18 @@ export default function VerifyEmailPage() {
               type="button"
               onClick={handleResend}
               disabled={cooldown > 0 || resending}
-              className="text-xs text-white/60 hover:text-white inline-flex items-center gap-1.5 disabled:opacity-40 transition"
+              className={`text-xs inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl transition ${
+                cooldown > 0
+                  ? "text-white/40 bg-white/[0.02] border border-white/5 cursor-not-allowed"
+                  : "text-purple-300 hover:text-white bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/20 font-medium"
+              }`}
             >
-              <RefreshCw className={`h-3 w-3 ${resending ? "animate-spin" : ""}`} />
+              <RefreshCw className={`h-3 w-3 ${resending ? "animate-spin text-purple-400" : ""}`} />
               <span>
                 {cooldown > 0
                   ? `Resend code in ${cooldown}s`
                   : resending
-                  ? "Sending..."
+                  ? "Dispatching code..."
                   : "Didn't receive the email? Resend"}
               </span>
             </button>

@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo, useRef, useLayoutEffect } from "react";
+import React, { useEffect, useState, useMemo, useRef, useLayoutEffect, useCallback } from "react";
 import { useWindowVirtualizer } from "@tanstack/react-virtual";
 import {
   BadgeCheck,
@@ -121,20 +121,26 @@ function CopyAddressButton({ address }) {
   );
 }
 
-function DocPreview({ docId, label, onExpand }) {
-  const [url, setUrl] = useState(null);
+function DocPreview({ docId, directUrl, label, onExpand, acquireBlobUrl, releaseBlobUrl }) {
+  const [url, setUrl] = useState(directUrl || null);
   const [err, setErr] = useState(false);
   const [errorDetails, setErrorDetails] = useState(null);
 
   const isAddressProof = label === "id_back" || label === "address_proof";
 
   useEffect(() => {
+    if (directUrl) {
+      setUrl(directUrl);
+      setErr(false);
+      return;
+    }
+    if (!docId) return;
+
     let active = true;
-    let objectUrl = null;
-    fetchAdminKycDocUrl(docId)
+    const loader = acquireBlobUrl ? acquireBlobUrl(docId) : fetchAdminKycDocUrl(docId);
+    loader
       .then((u) => {
         if (active) {
-          objectUrl = u;
           setUrl(u);
         }
       })
@@ -150,11 +156,14 @@ function DocPreview({ docId, label, onExpand }) {
           );
         }
       });
+
     return () => {
       active = false;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      if (releaseBlobUrl) {
+        releaseBlobUrl(docId);
+      }
     };
-  }, [docId, label]);
+  }, [docId, directUrl, label, acquireBlobUrl, releaseBlobUrl]);
 
   const displayLabel =
     label === "id_front"
@@ -256,6 +265,73 @@ export default function AdminKycPage() {
   const [editKycRecord, setEditKycRecord] = useState(null);
   const [rejectReason, setRejectReason] = useState("");
   const [lightbox, setLightbox] = useState(null); // { url, title }
+
+  // Shared lifecycle registry to manage KYC document blob URLs across thumbnails & zoom modal
+  const blobRegistryRef = useRef(new Map());
+  const lightboxRef = useRef(lightbox);
+  lightboxRef.current = lightbox;
+
+  const acquireBlobUrl = useCallback((docId) => {
+    if (!docId) return Promise.reject(new Error("Document ID required"));
+    const registry = blobRegistryRef.current;
+    if (registry.has(docId)) {
+      const entry = registry.get(docId);
+      entry.activeCount++;
+      entry.pendingRevocation = false;
+      return Promise.resolve(entry.url);
+    }
+    return fetchAdminKycDocUrl(docId).then((url) => {
+      registry.set(docId, {
+        url,
+        activeCount: 1,
+        pendingRevocation: false,
+      });
+      return url;
+    });
+  }, []);
+
+  const releaseBlobUrl = useCallback((docId) => {
+    const registry = blobRegistryRef.current;
+    const entry = registry.get(docId);
+    if (!entry) return;
+    entry.activeCount = Math.max(0, entry.activeCount - 1);
+    if (entry.activeCount === 0) {
+      const currentZoomUrl = lightboxRef.current?.url;
+      if (currentZoomUrl && currentZoomUrl === entry.url) {
+        // Zoom modal is currently displaying this image — keep it alive!
+        entry.pendingRevocation = true;
+      } else {
+        URL.revokeObjectURL(entry.url);
+        registry.delete(docId);
+      }
+    }
+  }, []);
+
+  const handleCloseLightbox = useCallback(() => {
+    const closedUrl = lightboxRef.current?.url;
+    setLightbox(null);
+    if (closedUrl) {
+      const registry = blobRegistryRef.current;
+      for (const [id, entry] of registry.entries()) {
+        if (entry.url === closedUrl && (entry.activeCount === 0 || entry.pendingRevocation)) {
+          URL.revokeObjectURL(entry.url);
+          registry.delete(id);
+          break;
+        }
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      for (const [, entry] of blobRegistryRef.current.entries()) {
+        try {
+          URL.revokeObjectURL(entry.url);
+        } catch {}
+      }
+      blobRegistryRef.current.clear();
+    };
+  }, []);
 
   const rawKycRecords = useMemo(() => list || [], [list]);
 
@@ -856,7 +932,10 @@ export default function AdminKycPage() {
                           <DocPreview
                             key={d.id}
                             docId={d.id}
+                            directUrl={d.url}
                             label={d.doc_type === "selfie" ? "Live Camera Selfie" : d.doc_type}
+                            acquireBlobUrl={acquireBlobUrl}
+                            releaseBlobUrl={releaseBlobUrl}
                             onExpand={(url, title) =>
                               setLightbox({
                                 url,
@@ -1130,7 +1209,7 @@ export default function AdminKycPage() {
       {/* INTERACTIVE KYC IMAGE ZOOM & ROTATE INSPECTION MODAL */}
       <AdminImageZoomModal
         open={Boolean(lightbox)}
-        onClose={() => setLightbox(null)}
+        onClose={handleCloseLightbox}
         imageUrl={lightbox?.url}
         title={lightbox?.title || "KYC Document Inspection"}
         subtitle="Use scroll wheel or controls to zoom, drag to pan across high-res details, or rotate orientation."

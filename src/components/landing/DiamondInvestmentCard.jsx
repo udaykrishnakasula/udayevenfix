@@ -692,7 +692,7 @@ function InvestmentCardBase({
                     }}
                   />
                   <motion.span
-                    className="absolute top-1/2 h-[2.4cqw] w-[2.4cqw] -translate-y-1/2 rounded-full"
+                    className="absolute top-1/2 h-[2.4cqw] w-[2.4cqw] -translate-x-1/2 -translate-y-1/2 rounded-full"
                     style={{
                       left: `${progressPercent}%`,
                       background: theme.timelineDot,

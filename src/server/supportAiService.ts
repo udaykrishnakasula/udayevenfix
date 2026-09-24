@@ -11,7 +11,7 @@ import {
 
 export interface SupportAiSettings {
   is_enabled: boolean;
-  model_name: string; // default "gemini-3.7-flash"
+  model_name: string; // default "gemini-3.1-flash-lite"
   temperature: number; // default 0.2
   rate_limit_per_10min: number; // default 25
   custom_system_guidelines: string;
@@ -64,9 +64,16 @@ export interface SupportAiUnansweredRecord {
   status: "PENDING" | "REVIEWED" | "RESOLVED";
 }
 
+export function normalizeModelName(name?: string): string {
+  if (!name || name === "gemini-3.7-flash" || name === "gemini-2.0-flash" || name === "gemini-1.5-flash" || name === "gemini-pro") {
+    return "gemini-3.1-flash-lite";
+  }
+  return name;
+}
+
 export const DEFAULT_AI_SETTINGS: SupportAiSettings = {
   is_enabled: true,
-  model_name: "gemini-3.7-flash",
+  model_name: "gemini-3.1-flash-lite",
   temperature: 0.2,
   rate_limit_per_10min: 30,
   custom_system_guidelines: "",
@@ -279,9 +286,13 @@ export class SupportAiService {
   // -------------------------------------------------------------
 
   getSettings(): SupportAiSettings {
-    return {
+    const raw = {
       ...DEFAULT_AI_SETTINGS,
       ...(this.db.support_ai_settings || {}),
+    };
+    return {
+      ...raw,
+      model_name: normalizeModelName(raw.model_name),
     };
   }
 
@@ -290,6 +301,7 @@ export class SupportAiService {
     const updated: SupportAiSettings = {
       ...current,
       ...patch,
+      model_name: patch.model_name !== undefined ? normalizeModelName(patch.model_name) : current.model_name,
       is_enabled: patch.is_enabled !== undefined ? Boolean(patch.is_enabled) : current.is_enabled,
       temperature: patch.temperature !== undefined ? Math.min(1.0, Math.max(0.0, Number(patch.temperature))) : current.temperature,
       rate_limit_per_10min: patch.rate_limit_per_10min ? Number(patch.rate_limit_per_10min) : current.rate_limit_per_10min,
@@ -474,7 +486,7 @@ export class SupportAiService {
           allFaqsSummary: publishedFaqs.map((f) => `- [${f.category}] ${f.title}`).join("\n"),
           customGuidelines: settings.custom_system_guidelines,
           temperature: settings.temperature,
-          modelName: settings.model_name || "gemini-3.7-flash",
+          modelName: normalizeModelName(settings.model_name),
         });
 
         aiResponseText = result.text;
@@ -655,22 +667,44 @@ ${params.allFaqsSummary}
 
 Provide your helpful response based strictly on the approved EasyX knowledge base:`;
 
-    const callPromise = this.genAiClient.models.generateContent({
-      model: params.modelName || "gemini-3.7-flash",
-      contents: prompt,
-      config: {
-        systemInstruction: systemInstruction,
-        temperature: params.temperature || 0.2,
-      },
-    });
+    const executeCall = async (modelToUse: string, timeoutMs: number) => {
+      let timer: NodeJS.Timeout | null = null;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Gemini generation timed out after ${timeoutMs}ms`)), timeoutMs);
+      });
 
-    const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("Gemini generation timed out after 5000ms")), 5000)
-    );
+      try {
+        const callPromise = this.genAiClient!.models.generateContent({
+          model: modelToUse,
+          contents: prompt,
+          config: {
+            systemInstruction: systemInstruction,
+            temperature: params.temperature || 0.2,
+          },
+        });
 
-    const response: any = await Promise.race([callPromise, timeoutPromise]);
+        const resp: any = await Promise.race([callPromise, timeoutPromise]);
+        return resp;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    };
 
-    const responseText = (response.text || "").trim();
+    let response: any;
+    const primaryModel = normalizeModelName(params.modelName) || "gemini-3.1-flash-lite";
+
+    try {
+      response = await executeCall(primaryModel, 20000);
+    } catch (primaryErr: any) {
+      if (primaryModel !== "gemini-3.1-flash-lite") {
+        console.warn(`[SupportAI] Primary model ${primaryModel} failed (${primaryErr?.message || primaryErr}), trying fallback gemini-3.1-flash-lite`);
+        response = await executeCall("gemini-3.1-flash-lite", 15000);
+      } else {
+        throw primaryErr;
+      }
+    }
+
+    const responseText = (response?.text || "").trim();
 
     // Check if the response indicates low confidence or unanswered state
     const isUnanswered =

@@ -105,7 +105,15 @@ export class ReminderEngine {
           scheduled_at: r.scheduled_for || r.created_at,
           sent_at: r.sent_at,
           channel: r.channel,
-          status: r.status,
+          status: r.status
+            ? r.status.toLowerCase() === "sent"
+              ? "SENT"
+              : r.status.toLowerCase() === "skipped"
+              ? "SKIPPED"
+              : r.status.toLowerCase() === "cancelled"
+              ? "STOPPED"
+              : r.status.toUpperCase()
+            : "SENT",
           reason: r.reason,
           push_status: r.push_status,
           action_completed: Boolean(r.action_completed),
@@ -603,6 +611,15 @@ export class ReminderEngine {
         // Authoritatively persist record into Supabase reminder_execution_logs
         if (isSupabaseAdminConfigured()) {
           const adminClient = getSupabaseAdmin();
+          const dbStatus =
+            logEntry.status === "SENT"
+              ? "sent"
+              : logEntry.status === "SKIPPED"
+              ? "skipped"
+              : logEntry.status === "STOPPED"
+              ? "cancelled"
+              : "failed";
+
           adminClient.from("reminder_execution_logs").insert({
             id: logEntry.id,
             user_id: user.id,
@@ -611,7 +628,7 @@ export class ReminderEngine {
             scheduled_for: logEntry.scheduled_at,
             sent_at: logEntry.sent_at,
             channel: logEntry.channel,
-            status: logEntry.status,
+            status: dbStatus,
             reason: logEntry.reason,
             push_status: logEntry.push_status,
             action_completed: false,

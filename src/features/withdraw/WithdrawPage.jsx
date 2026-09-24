@@ -14,6 +14,7 @@ import {
   money,
 } from "@/features/dashboard/api";
 import { apiError } from "@/lib/api";
+import { SixDigitOtpInput } from "@/shared/ui/input-otp";
 import {
   PageHeading,
   EasyXCard,
@@ -117,10 +118,12 @@ export default function WithdrawPage() {
   };
 
   // Step 2: Verify OTP and create withdrawal request
-  const handleConfirmWithdrawal = async (e) => {
-    e?.preventDefault();
-    const cleanOtp = otp.trim();
-    if (cleanOtp.length !== 6 || createWithdrawal.isPending) return;
+  const handleConfirmWithdrawal = async (e, overrideOtp) => {
+    if (e && typeof e.preventDefault === "function") e.preventDefault();
+    if (createWithdrawal.isPending || timeLeft === 0) return;
+    const candidateOtp = typeof overrideOtp === "string" ? overrideOtp : (typeof e === "string" ? e : otp);
+    const cleanOtp = (candidateOtp || "").replace(/\D/g, "").slice(0, 6);
+    if (cleanOtp.length !== 6) return;
     try {
       await createWithdrawal.mutateAsync({
         network,
@@ -256,7 +259,7 @@ export default function WithdrawPage() {
                   <strong className="text-ex-text">{maskedEmail || "your verified email"}</strong>.
                 </div>
 
-                <div>
+                <div className="space-y-2">
                   <div className="flex items-center justify-between mb-1.5">
                     <label className="text-xs text-ex-muted font-medium">6-Digit Security Code</label>
                     <span className={`text-xs font-mono font-medium ${timeLeft < 60 ? "text-red-400" : "text-ex-muted"}`}>
@@ -265,17 +268,18 @@ export default function WithdrawPage() {
                         : "Code expired"}
                     </span>
                   </div>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    pattern="[0-9]*"
-                    maxLength={6}
-                    autoFocus
-                    placeholder="000000"
+                  <SixDigitOtpInput
+                    id="withdraw-otp"
                     value={otp}
-                    onChange={(e) => setOtp(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                    className="w-full rounded-ex-ctrl bg-white/5 border border-white/10 px-3 py-3 text-center text-xl font-mono tracking-[8px] text-ex-text placeholder:text-ex-muted/30 focus:border-ex-accent focus:outline-none"
-                    data-testid="withdraw-otp-input"
+                    onChange={(val) => setOtp(val.replace(/\D/g, "").slice(0, 6))}
+                    onComplete={(val) => {
+                      if (!createWithdrawal.isPending && timeLeft > 0) {
+                        handleConfirmWithdrawal(undefined, val);
+                      }
+                    }}
+                    disabled={createWithdrawal.isPending || timeLeft === 0}
+                    autoFocus
+                    dataTestId="withdraw-otp-input"
                   />
                 </div>
 

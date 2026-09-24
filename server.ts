@@ -1320,7 +1320,10 @@ function sanitizeAuthToken(rawHeader?: string): string | null {
 }
 
 const authMiddleware = async (req: Request, res: Response, next: NextFunction) => {
-  const rawAuth = req.headers.authorization || (typeof req.query?.token === "string" ? req.query.token : undefined);
+  const rawAuth =
+    req.headers.authorization ||
+    (typeof req.query?.token === "string" ? req.query.token : undefined) ||
+    (typeof req.query?.auth === "string" ? req.query.auth : undefined);
   const token = sanitizeAuthToken(rawAuth);
   if (!token) {
     return res.status(401).json({ detail: "Not authenticated" });
@@ -2288,7 +2291,6 @@ api.post("/auth/forgot-password", forgotPasswordLimiter, async (req, res) => {
       raw_email: cleanEmail,
       expires_in_minutes: 5,
       cooldown_seconds: result.cooldownSeconds || 60,
-      reset_token: result.token,
     });
   } catch (err: any) {
     res.status(400).json({ detail: err.message || "Failed to request password reset code." });
@@ -2296,15 +2298,14 @@ api.post("/auth/forgot-password", forgotPasswordLimiter, async (req, res) => {
 });
 
 api.post("/auth/verify-reset-code", forgotPasswordLimiter, async (req, res) => {
-  const { email, code, token, reset_token } = req.body;
+  const { email, code } = req.body;
   if (!email) {
     return res.status(422).json({ detail: "Email is required." });
   }
   const cleanEmail = String(email).trim().toLowerCase();
-  const inputCode = String(code || "").trim();
-  const inputToken = String(token || reset_token || "").trim();
+  const inputCode = String(code || "").trim().replace(/\D/g, "");
 
-  if (!inputCode && !inputToken) {
+  if (!inputCode || inputCode.length !== 6) {
     return res.status(422).json({ detail: "Please enter the 6-digit verification code." });
   }
 
@@ -2313,7 +2314,6 @@ api.post("/auth/verify-reset-code", forgotPasswordLimiter, async (req, res) => {
       purpose: "FORGOT_PASSWORD",
       email: cleanEmail,
       code: inputCode,
-      token: inputToken,
     });
 
     res.json({
@@ -2371,7 +2371,6 @@ api.post("/auth/resend-reset-code", forgotPasswordLimiter, async (req, res) => {
       raw_email: cleanEmail,
       expires_in_minutes: 5,
       cooldown_seconds: result.cooldownSeconds || 60,
-      reset_token: result.token,
     });
   } catch (err: any) {
     res.status(400).json({ detail: err.message || "Failed to resend verification code." });
@@ -2379,7 +2378,7 @@ api.post("/auth/resend-reset-code", forgotPasswordLimiter, async (req, res) => {
 });
 
 api.post("/auth/reset-password", forgotPasswordLimiter, async (req, res) => {
-  const { email, code, token, reset_token, new_password, confirm_password } = req.body;
+  const { email, token, reset_token, new_password, confirm_password } = req.body;
   if (!email || !new_password) {
     return res.status(422).json({ detail: "Email and new password are required." });
   }
@@ -2403,33 +2402,18 @@ api.post("/auth/reset-password", forgotPasswordLimiter, async (req, res) => {
     return res.status(404).json({ detail: "User with this email not found." });
   }
 
-  const inputCode = String(code || "").trim();
   const inputToken = String(token || reset_token || "").trim();
-
-  // Validate OTP / authorization token via otpService
-  let isAuthorized = false;
-  try {
-    // 1. Check if token was previously verified
-    const tokenValid = await otpService.validateVerifiedToken("FORGOT_PASSWORD", cleanEmail, inputToken);
-    if (tokenValid) {
-      isAuthorized = true;
-    } else {
-      // 2. Or verify code directly if submitted together
-      await otpService.verifyOtp({
-        purpose: "FORGOT_PASSWORD",
-        email: cleanEmail,
-        code: inputCode,
-        token: inputToken,
-      });
-      isAuthorized = true;
-    }
-  } catch (authErr: any) {
-    isAuthorized = false;
+  if (!inputToken) {
+    return res.status(400).json({
+      detail: "Verification authorization token is required. Please verify your OTP code first.",
+    });
   }
 
-  if (!isAuthorized && !req.headers.authorization) {
+  // Validate that this reset token has been authoritatively verified via OTP
+  const isAuthorized = await otpService.validateVerifiedToken("FORGOT_PASSWORD", cleanEmail, inputToken);
+  if (!isAuthorized) {
     return res.status(400).json({
-      detail: "Invalid or expired email verification code. Please request a new verification code.",
+      detail: "Invalid or expired email verification session. Please request a new verification code.",
     });
   }
 
@@ -2706,6 +2690,107 @@ api.get("/deposits", authMiddleware, async (req, res) => {
     return res.status(503).json({ detail: "Deposits data temporarily unavailable from authoritative database." });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Secure Deposit Proof Streaming Endpoint
+// Authenticates user/admin, verifies deposit ownership, downloads and streams
+// image from private Supabase Storage bucket 'deposit-proofs'
+// ---------------------------------------------------------------------------
+const handleDepositProofServe = async (req: Request, res: Response) => {
+  const depositId = (req.params.id || (req.params as any).depositId || "").trim();
+  const rawIndex = req.query.index || (req.params as any).index || "0";
+  const index = Math.max(0, parseInt(String(rawIndex), 10) || 0);
+
+  if (!depositId) {
+    return res.status(400).json({ detail: "Deposit ID required" });
+  }
+
+  const reqUser = (req as any).user;
+  if (!reqUser) {
+    return res.status(401).json({ detail: "Not authenticated" });
+  }
+
+  if (!isSupabaseAdminConfigured()) {
+    return res.status(503).json({ detail: "Storage service temporarily unavailable." });
+  }
+
+  const adminClient = getSupabaseAdmin();
+  if (!adminClient) {
+    return res.status(503).json({ detail: "Storage database unavailable." });
+  }
+
+  try {
+    // 1. Retrieve authoritative deposit record from Supabase
+    const { data: deposit, error: depErr } = await adminClient
+      .from("payment_deposits")
+      .select("id, user_id, proof_file_url, status")
+      .eq("id", depositId)
+      .maybeSingle();
+
+    if (depErr || !deposit) {
+      return res.status(404).json({ detail: "Deposit record not found." });
+    }
+
+    // 2. Authorize: Admin or owner of the deposit
+    const soleAdminEmail = getSoleAdminEmail();
+    const userEmail = (reqUser.email || "").toLowerCase().trim();
+    const isAdmin = reqUser.role === "admin" || (soleAdminEmail && userEmail === soleAdminEmail);
+
+    if (!isAdmin && deposit.user_id !== reqUser.id) {
+      console.warn(`[EasyX Security] Blocked unauthorized deposit proof access attempt for deposit ${depositId} by user ${reqUser.id}`);
+      return res.status(403).json({ detail: "Access denied to this deposit proof." });
+    }
+
+    // 3. Resolve the requested proof image from authoritative Storage path
+    const paths = (deposit.proof_file_url || "").split(",").map((s: string) => s.trim()).filter(Boolean);
+    const targetPath = paths[index] !== undefined ? paths[index] : paths[0];
+
+    if (!targetPath) {
+      return res.status(404).json({ detail: "Proof image not found for this deposit." });
+    }
+
+    // 4. Download/stream the object from private Supabase Storage
+    const { data: fileBlob, error: downloadErr } = await adminClient
+      .storage
+      .from("deposit-proofs")
+      .download(targetPath);
+
+    if (downloadErr || !fileBlob) {
+      console.error(`[EasyX Deposit Proof] Download failed for path ${targetPath}:`, downloadErr?.message);
+      return res.status(404).json({ detail: "Deposit proof object not found in storage." });
+    }
+
+    const buffer = Buffer.from(await fileBlob.arrayBuffer());
+
+    let contentType = fileBlob.type || "image/jpeg";
+    const lower = targetPath.toLowerCase();
+    if (lower.endsWith(".png")) contentType = "image/png";
+    else if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) contentType = "image/jpeg";
+    else if (lower.endsWith(".webp")) contentType = "image/webp";
+    else if (lower.endsWith(".pdf")) contentType = "application/pdf";
+
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Length", buffer.length);
+    res.setHeader("Cache-Control", "private, no-cache, no-store, must-revalidate");
+    return res.end(buffer);
+  } catch (err: any) {
+    console.error("[EasyX Deposit Proof] Streaming error:", err?.message);
+    return res.status(500).json({ detail: "Failed to stream deposit proof." });
+  }
+};
+
+api.get(
+  [
+    "/deposits/proof/:id",
+    "/deposits/proof/:id/:index",
+    "/deposits/:id/proof",
+    "/deposits/:id/proof/:index",
+    "/admin/deposits/proof/:id",
+    "/admin/deposits/proof/:id/:index",
+  ],
+  authMiddleware,
+  handleDepositProofServe
+);
 
 // Withdrawals
 api.get("/withdrawals/config", authMiddleware, (_req, res) => {
@@ -3914,12 +3999,13 @@ function getValidImageOrSvgDoc(doc: any, docLabel?: string): { buffer: Buffer; c
   return { buffer: Buffer.from(svg, "utf8"), contentType: "image/svg+xml; charset=utf-8" };
 }
 
-api.get("/kyc/documents/:id", authMiddleware, async (req, res) => {
+const handleKycServe = async (req: Request, res: Response, isAdmin: boolean) => {
   const user = (req as any).user;
-  const docId = req.params.id;
+  const rawParam = req.params.id || (req.params as any)[0] || "";
+  const docId = decodeURIComponent(rawParam);
 
   try {
-    const stream = await supabaseDb.getKycDocumentStream(docId, user.role === "admin", user.id);
+    const stream = await supabaseDb.getKycDocumentStream(docId, isAdmin || user?.role === "admin", user?.id);
     if (stream) {
       res.setHeader("Content-Type", stream.contentType);
       res.setHeader("Cache-Control", "private, no-cache, no-store, must-revalidate");
@@ -3933,24 +4019,10 @@ api.get("/kyc/documents/:id", authMiddleware, async (req, res) => {
     console.error("[KYC Document Stream] Authoritative retrieval error:", err?.message);
     return res.status(503).json({ detail: "KYC document temporarily unavailable from authoritative storage." });
   }
-});
+};
 
-api.get("/admin/kyc/documents/:id", adminMiddleware, async (req, res) => {
-  const docId = decodeURIComponent(req.params.id);
-
-  try {
-    const stream = await supabaseDb.getKycDocumentStream(docId, true);
-    if (stream) {
-      res.setHeader("Content-Type", stream.contentType);
-      res.setHeader("Cache-Control", "private, no-cache, no-store, must-revalidate");
-      return res.send(stream.buffer);
-    }
-    return res.status(404).json({ detail: "KYC document not found in Supabase Storage." });
-  } catch (err: any) {
-    console.error("[Admin KYC] Authoritative Supabase Storage download error:", err?.message);
-    return res.status(503).json({ detail: "KYC document temporarily unavailable from authoritative storage." });
-  }
-});
+api.get(["/kyc/documents/:id", "/kyc/documents/*"], authMiddleware, (req, res) => handleKycServe(req, res, false));
+api.get(["/admin/kyc/documents/:id", "/admin/kyc/documents/*"], adminMiddleware, (req, res) => handleKycServe(req, res, true));
 
 // ==================== ADMIN ROUTES ====================
 
@@ -6820,19 +6892,41 @@ const handleAttachmentServe = async (req: Request, res: Response) => {
     }
 
     let authUser: any = null;
-    try {
-      const payload = jwt.verify(token, JWT_SECRET) as any;
-      const userId = payload?.sub || payload?.id;
-      if (userId) {
+    let userId: string | null = null;
+
+    // 1. Try Supabase Auth Token verification
+    if (adminClient) {
+      try {
+        const { data: sbAuth, error: sbErr } = await adminClient.auth.getUser(token);
+        if (!sbErr && sbAuth?.user?.id) {
+          userId = sbAuth.user.id;
+        }
+      } catch {
+        // Fall through to JWT verify
+      }
+    }
+
+    // 2. Fallback to server-signed JWT
+    if (!userId) {
+      try {
+        const payload = jwt.verify(token, JWT_SECRET) as any;
+        userId = payload?.sub || payload?.id;
+      } catch {
+        // Fall through
+      }
+    }
+
+    if (userId) {
+      try {
         const p = await supabaseDb.getProfileById(userId);
         if (p) authUser = supabaseDb.formatProfile(p);
+      } catch {
+        // Profile fetch error
       }
-    } catch {
-      return res.status(401).json({ detail: "Invalid or expired authentication token." });
     }
 
     if (!authUser) {
-      return res.status(401).json({ detail: "User not found or unauthenticated." });
+      return res.status(401).json({ detail: "Invalid or expired authentication token." });
     }
 
     // Authorization check
@@ -6845,6 +6939,46 @@ const handleAttachmentServe = async (req: Request, res: Response) => {
       const ticket = db.support_tickets.get(attachment.ticket_id);
       if (ticket && ticket.user_id === authUser.id) {
         authorized = true;
+      } else if (isSupabaseAdminConfigured()) {
+        const { data: ticketRow } = await adminClient
+          .from("support_tickets")
+          .select("user_id")
+          .eq("id", attachment.ticket_id)
+          .maybeSingle();
+        if (ticketRow && ticketRow.user_id === authUser.id) {
+          authorized = true;
+        }
+      }
+    }
+
+    // If still not determined, check if attachment is linked in Supabase support_messages
+    if (!authorized && isSupabaseAdminConfigured()) {
+      const { data: msgRows } = await adminClient
+        .from("support_messages")
+        .select("ticket_id, sender_id, attachments")
+        .limit(100);
+      if (msgRows) {
+        for (const m of msgRows) {
+          const atts = Array.isArray(m.attachments) ? m.attachments : [];
+          const hasAtt = atts.some((a: any) => (typeof a === "string" ? a === id : a?.id === id));
+          if (hasAtt) {
+            if (m.sender_id === authUser.id) {
+              authorized = true;
+              break;
+            }
+            if (m.ticket_id) {
+              const { data: tRow } = await adminClient
+                .from("support_tickets")
+                .select("user_id")
+                .eq("id", m.ticket_id)
+                .maybeSingle();
+              if (tRow && tRow.user_id === authUser.id) {
+                authorized = true;
+                break;
+              }
+            }
+          }
+        }
       }
     }
 

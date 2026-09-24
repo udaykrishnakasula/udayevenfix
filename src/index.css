@@ -247,3 +247,14 @@ code {
   transform-origin: top center !important;
   animation: bell-ring 3.5s cubic-bezier(0.36, 0.07, 0.19, 0.97) infinite !important;
 }
+
+/* EasyX Smooth Shake for OTP error state */
+@keyframes easyx-shake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-5px); }
+  40%, 80% { transform: translateX(5px); }
+}
+
+.animate-shake {
+  animation: easyx-shake 0.4s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
+}

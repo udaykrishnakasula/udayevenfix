@@ -20,6 +20,7 @@ import {
   useCreateDeposit,
   usePublicMaintenance,
   money,
+  getAuthenticatedProofUrl,
 } from "@/user/api";
 import { apiError } from "@/shared/lib/api";
 import {
@@ -462,17 +463,20 @@ export default function DepositPage() {
                         {d.proof_images.length} proof image{d.proof_images.length > 1 ? "s" : ""}:
                       </span>
                       <div className="flex items-center gap-1.5">
-                        {d.proof_images.map((img, idx) => (
-                          <button
-                            key={idx}
-                            type="button"
-                            onClick={() => setPreviewModalImg({ url: img, title: `Deposit Proof #${idx + 1} (${money(d.amount)} USDT)` })}
-                            className="h-8 w-8 rounded overflow-hidden border border-white/15 bg-black/40 hover:border-ex-accent transition shrink-0"
-                            title={`View Proof #${idx + 1}`}
-                          >
-                            <img src={img} alt={`Proof ${idx + 1}`} className="h-full w-full object-cover" />
-                          </button>
-                        ))}
+                        {d.proof_images.map((img, idx) => {
+                          const displayUrl = getAuthenticatedProofUrl(img);
+                          return (
+                            <button
+                              key={idx}
+                              type="button"
+                              onClick={() => setPreviewModalImg({ url: displayUrl, title: `Deposit Proof #${idx + 1} (${money(d.amount)} USDT)` })}
+                              className="h-8 w-8 rounded overflow-hidden border border-white/15 bg-black/40 hover:border-ex-accent transition shrink-0"
+                              title={`View Proof #${idx + 1}`}
+                            >
+                              <img src={displayUrl} alt={`Proof ${idx + 1}`} className="h-full w-full object-cover" />
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
                   )}

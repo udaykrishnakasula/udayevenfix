@@ -20,6 +20,7 @@ import {
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Label } from "@/shared/ui/label";
+import { SixDigitOtpInput } from "@/shared/ui/input-otp";
 import { api, apiError } from "@/shared/lib/api";
 import AuthLayout from "./AuthLayout";
 import { FORGOT_PASSWORD } from "@/constants/testIds/auth";
@@ -54,6 +55,7 @@ export default function ForgotPasswordPage() {
   const [code, setCode] = useState("");
   const [resetToken, setResetToken] = useState("");
   const [sessionExpiredMessage, setSessionExpiredMessage] = useState("");
+  const [verifyError, setVerifyError] = useState("");
 
   // Step 3 State
   const [newPassword, setNewPassword] = useState("");
@@ -185,6 +187,7 @@ export default function ForgotPasswordPage() {
     setExpiresIn(900);
     setCooldown(0);
     setSessionExpiredMessage("");
+    setVerifyError("");
     setStep(1);
     toast.info("Please enter your registered email address to begin a new recovery request.");
   };
@@ -221,8 +224,8 @@ export default function ForgotPasswordPage() {
       setEmail(cleanEmail);
       setMaskedEmail(computedMask);
       
-      toast.success("OTP Sent", {
-        description: `A 6-digit verification code has been dispatched to ${computedMask} via Resend. Check your inbox or spam folder.`,
+      toast.success("Check your email", {
+        description: "If an account is associated with this email, a 6-digit verification code will be sent.",
         duration: 5000,
       });
       
@@ -256,9 +259,12 @@ export default function ForgotPasswordPage() {
   };
 
   // STEP 2: Verify Code
-  const handleVerifyCode = async (e) => {
-    if (e) e.preventDefault();
-    const cleanCode = code.trim().replace(/\D/g, "");
+  const handleVerifyCode = async (e, overrideCode) => {
+    if (e && typeof e.preventDefault === "function") e.preventDefault();
+    if (verifyingCode || expiresIn <= 0) return;
+
+    const candidateCode = typeof overrideCode === "string" ? overrideCode : (typeof e === "string" ? e : code);
+    const cleanCode = candidateCode.trim().replace(/\D/g, "").slice(0, 6);
     if (!cleanCode || cleanCode.length < 6) {
       toast.error("Please enter the complete 6-digit verification code.");
       return;
@@ -266,6 +272,7 @@ export default function ForgotPasswordPage() {
 
     const cleanEmail = email.trim().toLowerCase();
     setVerifyingCode(true);
+    setVerifyError("");
     try {
       const { data } = await api.post("/auth/verify-reset-code", {
         email: cleanEmail,
@@ -294,7 +301,9 @@ export default function ForgotPasswordPage() {
 
       setStep(3);
     } catch (err) {
-      toast.error(apiError(err, "Invalid or expired verification code."));
+      const errMsg = apiError(err, "Invalid or expired verification code.");
+      setVerifyError(errMsg);
+      toast.error(errMsg);
     } finally {
       setVerifyingCode(false);
     }
@@ -305,13 +314,13 @@ export default function ForgotPasswordPage() {
     if (cooldown > 0) return;
     const cleanEmail = email.trim().toLowerCase();
     setResendingCode(true);
+    setVerifyError("");
     try {
       const { data } = await api.post("/auth/resend-reset-code", {
         email: cleanEmail,
       });
-      const targetMask = maskedEmail || maskEmail(cleanEmail);
-      toast.success("OTP Sent", {
-        description: `A new 6-digit verification code has been dispatched to ${targetMask} via Resend. Check your inbox.`,
+      toast.success("Check your email", {
+        description: "If an account is associated with this email, a new 6-digit verification code will be sent.",
         duration: 5000,
       });
       if (data.cooldown_seconds) setCooldown(data.cooldown_seconds);
@@ -395,7 +404,7 @@ export default function ForgotPasswordPage() {
         step === 1
           ? "Enter your registered EasyX email address to receive a verification code."
           : step === 2
-          ? `We sent a 6-digit verification code to ${maskedEmail || maskEmail(email)}.`
+          ? `If an account is associated with this email, a 6-digit verification code will be sent to ${maskedEmail || maskEmail(email)}.`
           : step === 3
           ? "Choose a strong password to secure your EasyX account."
           : "Your account is secured and ready for sign-in."
@@ -512,58 +521,70 @@ export default function ForgotPasswordPage() {
 
       {/* STEP 2: Verify Code */}
       {step === 2 && (
-        <form onSubmit={handleVerifyCode} className="space-y-4" data-testid="forgot-password-step-2">
+        <form onSubmit={handleVerifyCode} className="space-y-5" data-testid="forgot-password-step-2">
           {/* Read-only Locked Email Display Badge */}
-          <div className="p-3 rounded-xl bg-white/5 border border-white/10 text-xs flex items-center justify-between">
+          <div className="p-3.5 rounded-2xl bg-white/[0.04] border border-white/10 text-xs flex items-center justify-between shadow-inner">
             <div className="flex items-center gap-2 truncate">
               <Mail className="h-4 w-4 text-purple-400 shrink-0" />
-              <span className="text-white/60">Sent to:</span>
-              <strong className="text-white font-mono truncate">{maskedEmail || maskEmail(email)}</strong>
+              <span className="text-white/60">Code requested for:</span>
+              <strong className="text-purple-200 font-mono font-medium truncate">{maskedEmail || maskEmail(email)}</strong>
             </div>
-            <span className="text-[10px] uppercase font-semibold tracking-wider text-purple-300 bg-purple-950/60 border border-purple-500/30 px-2 py-0.5 rounded-full shrink-0">
+            <span className="text-[10px] uppercase font-bold tracking-wider text-purple-300 bg-purple-900/40 border border-purple-500/30 px-2.5 py-0.5 rounded-full shrink-0">
               Locked
             </span>
           </div>
 
-          {/* Verification Code Input */}
-          <div className="space-y-1.5">
+          {/* 6-Digit Separate Visual Boxes */}
+          <div className="space-y-3">
             <div className="flex items-center justify-between">
-              <Label htmlFor="verification-code" className="text-white/80 flex items-center gap-1.5">
+              <Label htmlFor="verification-code" className="text-white/90 text-xs font-semibold flex items-center gap-1.5 uppercase tracking-wider">
                 <KeyRound className="h-3.5 w-3.5 text-purple-400" />
-                6-Digit Verification Code
+                6-Digit Security Code
               </Label>
               {expiresIn > 0 ? (
-                <span className="text-[11px] text-amber-300 flex items-center gap-1 font-mono">
-                  <Clock className="h-3 w-3" /> Expires in {formatTime(expiresIn)}
+                <span className="text-[11px] text-amber-300/90 flex items-center gap-1 font-mono px-2 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/20">
+                  <Clock className="h-3 w-3 text-amber-400" /> Expires in {formatTime(expiresIn)}
                 </span>
               ) : (
-                <span className="text-[11px] text-rose-400 font-bold">Code Expired</span>
+                <span className="text-[11px] text-rose-400 font-bold flex items-center gap-1 px-2 py-0.5 rounded-full bg-rose-500/10 border border-rose-500/20">
+                  <AlertCircle className="h-3 w-3" /> Code Expired
+                </span>
               )}
             </div>
 
-            <Input
+            <SixDigitOtpInput
               id="verification-code"
-              ref={codeInputRef}
-              type="text"
-              inputMode="numeric"
-              maxLength={6}
-              placeholder="123456"
               value={code}
-              onChange={(e) => {
-                const val = e.target.value.replace(/\D/g, "").slice(0, 6);
-                setCode(val);
+              onChange={(val) => {
+                const clean = val.replace(/\D/g, "").slice(0, 6);
+                if (verifyError) setVerifyError("");
+                setCode(clean);
               }}
-              className="bg-white/5 border-white/15 text-white placeholder:text-white/20 h-12 text-center font-mono text-xl tracking-[0.35em] font-bold focus:border-purple-400"
-              data-testid={FORGOT_PASSWORD.codeInput}
-              required
+              onComplete={(val) => {
+                if (!verifyingCode && expiresIn > 0) {
+                  handleVerifyCode(undefined, val);
+                }
+              }}
+              disabled={verifyingCode || expiresIn <= 0}
+              isError={Boolean(verifyError)}
+              autoFocus
+              dataTestId={FORGOT_PASSWORD.codeInput}
             />
+
+            {/* Visual Error State Feedback */}
+            {verifyError && (
+              <div className="flex items-center justify-center gap-1.5 text-xs text-rose-400 font-medium p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/20 animate-shake">
+                <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                <span>{verifyError}</span>
+              </div>
+            )}
           </div>
 
           {/* Submit Verification Button */}
           <Button
             type="submit"
             disabled={verifyingCode || code.length < 6 || expiresIn <= 0}
-            className="w-full bg-white text-black hover:bg-white/90 rounded-full h-11 font-semibold transition"
+            className="w-full bg-gradient-to-r from-purple-600 via-indigo-600 to-purple-600 hover:from-purple-500 hover:via-indigo-500 hover:to-purple-500 text-white font-semibold rounded-full h-12 shadow-lg shadow-purple-600/25 active:scale-[0.99] transition-all flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none"
             data-testid={FORGOT_PASSWORD.verifyButton}
           >
             {verifyingCode ? (
@@ -571,7 +592,9 @@ export default function ForgotPasswordPage() {
                 <Loader2 className="h-4 w-4 animate-spin" /> Verifying Code...
               </span>
             ) : (
-              "Verify Code & Continue"
+              <span className="flex items-center gap-2">
+                <ShieldCheck className="h-4 w-4" /> Verify Code & Continue
+              </span>
             )}
           </Button>
 
@@ -581,15 +604,15 @@ export default function ForgotPasswordPage() {
               type="button"
               onClick={handleResendCode}
               disabled={cooldown > 0 || resendingCode}
-              className={`text-xs inline-flex items-center gap-1.5 ${
+              className={`text-xs inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl transition ${
                 cooldown > 0
-                  ? "text-white/40 cursor-not-allowed"
-                  : "text-purple-300 hover:text-white underline font-medium"
+                  ? "text-white/40 bg-white/[0.02] border border-white/5 cursor-not-allowed"
+                  : "text-purple-300 hover:text-white bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/20 font-medium"
               }`}
               data-testid={FORGOT_PASSWORD.resendButton}
             >
-              <RefreshCw className={`h-3 w-3 ${resendingCode ? "animate-spin" : ""}`} />
-              {cooldown > 0 ? `Resend new code in ${cooldown}s` : "Resend Verification Code"}
+              <RefreshCw className={`h-3 w-3 ${resendingCode ? "animate-spin text-purple-400" : ""}`} />
+              {cooldown > 0 ? `Resend new code in ${cooldown}s` : resendingCode ? "Requesting new code..." : "Resend Verification Code"}
             </button>
           </div>
 
@@ -598,7 +621,7 @@ export default function ForgotPasswordPage() {
             <button
               type="button"
               onClick={handleStartOver}
-              className="text-xs text-white/50 hover:text-white inline-flex items-center gap-1 transition"
+              className="text-xs text-white/50 hover:text-white inline-flex items-center gap-1.5 transition"
             >
               <RotateCcw className="h-3 w-3" />
               Entered the wrong email? Use a different email

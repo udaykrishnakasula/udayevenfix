@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import api from "@/shared/lib/api";
+import api, { getToken } from "@/shared/lib/api";
 
 export function useAdminDeposits(status) {
   return useQuery({
@@ -234,9 +234,41 @@ export function useBatchSetKycStatus() {
 // Fetch a protected KYC document as an object URL (admin-authenticated).
 export async function fetchAdminKycDocUrl(docId) {
   try {
-    const res = await api.get(`/admin/kyc/documents/${docId}`, { responseType: "blob" });
+    if (!docId) throw new Error("Document ID required");
+    const safeId = encodeURIComponent(String(docId).trim());
+    const res = await api.get(`/admin/kyc/documents/${safeId}`, { responseType: "blob" });
     if (!res?.data || (res.data.type && res.data.type.includes("application/json"))) {
       throw new Error("Invalid document response");
+    }
+    return URL.createObjectURL(res.data);
+  } catch (err) {
+    throw err;
+  }
+}
+
+// Convert authenticated deposit proof endpoint URL to include current session token if needed
+export function getAuthenticatedProofUrl(url) {
+  if (!url || typeof url !== "string") return "";
+  if (url.startsWith("/api/deposits/proof") || url.startsWith("/deposits/proof")) {
+    const token = getToken();
+    if (token && !url.includes("token=")) {
+      const sep = url.includes("?") ? "&" : "?";
+      return `${url}${sep}token=${encodeURIComponent(token)}`;
+    }
+  }
+  return url;
+}
+
+// Fetch a protected deposit proof as an object URL (admin/user authenticated)
+export async function fetchDepositProofUrl(depositId, index = 0) {
+  try {
+    if (!depositId) throw new Error("Deposit ID required");
+    const res = await api.get(`/deposits/proof/${encodeURIComponent(String(depositId).trim())}`, {
+      params: { index },
+      responseType: "blob",
+    });
+    if (!res?.data || (res.data.type && res.data.type.includes("application/json"))) {
+      throw new Error("Invalid proof response");
     }
     return URL.createObjectURL(res.data);
   } catch (err) {
